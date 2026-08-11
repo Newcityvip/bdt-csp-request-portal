@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Ops Request Hub — BDT × CSP Service Desk frontend prototype">
+  <title>Ops Request Hub</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="Main navigation">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">OR</div>
+        <div><strong>Ops Request Hub</strong><span>BDT × CSP Service Desk</span></div>
+      </div>
+      <nav class="nav-list">
+        <button class="nav-item active" data-view="dashboard"><span>▦</span> Dashboard</button>
+        <button class="nav-item" data-view="new-request"><span>＋</span> New Request</button>
+        <button class="nav-item" data-view="my-requests"><span>◫</span> My Requests</button>
+        <button class="nav-item" data-view="team-requests"><span>▤</span> Team Requests</button>
+        <p class="nav-label">CSP workspace</p>
+        <button class="nav-item" data-view="csp-queue"><span>◎</span> CSP Queue <b class="nav-count" id="queue-count">3</b></button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="user-card"><div class="avatar">N</div><div><strong>Nabil</strong><span>BDT Staff</span></div></div>
+        <button class="logout-button" type="button">↪ <span>Logout</span><small>Demo</small></button>
+      </div>
+    </aside>
+
+    <div class="main-area">
+      <header class="topbar">
+        <button class="menu-button" id="menu-button" aria-label="Open navigation" aria-expanded="false">☰</button>
+        <div><p class="eyebrow">BDT × CSP Service Desk</p><h1 id="page-title">Dashboard</h1></div>
+        <div class="topbar-actions"><span class="demo-chip">Demo mode</span><div class="avatar small">N</div></div>
+      </header>
+
+      <main class="workspace">
+        <section class="view active" id="dashboard-view" data-title="Dashboard">
+          <div class="welcome"><div><h2>Good day, Nabil</h2><p>Here’s the latest activity across your operational requests.</p></div><button class="primary-button" data-go="new-request">＋ New Request</button></div>
+          <div class="stats-grid" id="dashboard-stats"></div>
+          <div class="panel">
+            <div class="panel-header"><div><h2>Recent Requests</h2><p>Latest request activity from the service desk</p></div><button class="text-button" data-go="my-requests">View all →</button></div>
+            <div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Brand</th><th>Request Type</th><th>Player / Details</th><th>Status</th><th>Submitted</th><th>Handler</th><th>Action</th></tr></thead><tbody id="recent-requests"></tbody></table></div>
+          </div>
+        </section>
+
+        <section class="view" id="new-request-view" data-title="New Request">
+          <div class="page-intro"><div><h2>Create a new request</h2><p>Send an operational request to the CSP team. Required fields are marked with an asterisk.</p></div></div>
+          <div class="form-layout">
+            <form class="panel request-form" id="request-form" novalidate>
+              <div class="form-section-title"><span>1</span><div><h3>Request information</h3><p>Select a brand and the service you need.</p></div></div>
+              <div class="form-grid two">
+                <div class="field"><label for="brand">Brand <em>*</em></label><select id="brand" name="brand" required><option value="">Select brand</option></select><small class="error-text">Please select a brand.</small></div>
+                <div class="field"><label for="request-type">Request Type <em>*</em></label><select id="request-type" name="requestType" required><option value="">Select request type</option></select><small class="error-text">Please select a request type.</small></div>
+              </div>
+              <div id="dynamic-fields" class="dynamic-fields"><div class="form-placeholder"><span>↖</span><p>Select a request type to see the required details.</p></div></div>
+              <div class="form-actions"><p>Demo only — no data will be saved.</p><button class="primary-button" type="submit">Submit Request</button></div>
+            </form>
+            <aside class="help-card"><div class="help-icon">i</div><h3>Before you submit</h3><ul><li>Confirm the player username and brand.</li><li>Double-check phone numbers and email addresses.</li><li>Add context that helps CSP process the request.</li></ul><div class="privacy-note"><strong>Frontend prototype</strong><span>This form does not send or store information.</span></div></aside>
+          </div>
+        </section>
+
+        <section class="view" id="my-requests-view" data-title="My Requests">
+          <div class="page-intro"><div><h2>My Requests</h2><p>Track requests submitted by you.</p></div><button class="primary-button" data-go="new-request">＋ New Request</button></div>
+          <div class="panel"><div class="filters"><div class="search-field"><span>⌕</span><input id="my-search" type="search" placeholder="Search ticket, player, phone or email" aria-label="Search my requests"></div><select id="my-status" aria-label="Filter by status"><option value="">All statuses</option></select><select id="my-brand" aria-label="Filter by brand"><option value="">All brands</option></select><select id="my-type" aria-label="Filter by request type"><option value="">All request types</option></select></div><div class="result-summary" id="my-result-summary"></div><div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Brand</th><th>Request Type</th><th>Player / Details</th><th>Status</th><th>Submitted</th><th>Handler</th><th>Action</th></tr></thead><tbody id="my-requests-table"></tbody></table><div class="empty-state" id="my-empty" hidden><span>⌕</span><h3>No requests found</h3><p>Try changing or clearing your filters.</p></div></div></div>
+        </section>
+
+        <section class="view" id="team-requests-view" data-title="Team Requests">
+          <div class="page-intro"><div><h2>Team Requests</h2><p>All operational requests submitted by the BDT team.</p></div></div>
+          <div class="panel"><div class="filters"><div class="search-field"><span>⌕</span><input id="team-search" type="search" placeholder="Search team requests" aria-label="Search team requests"></div><select id="team-status" aria-label="Filter by status"><option value="">All statuses</option></select><select id="team-brand" aria-label="Filter by brand"><option value="">All brands</option></select></div><div class="result-summary" id="team-result-summary"></div><div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Brand</th><th>Request Type</th><th>Player / Details</th><th>Requested By</th><th>Status</th><th>Submitted</th><th>Action</th></tr></thead><tbody id="team-requests-table"></tbody></table><div class="empty-state" id="team-empty" hidden><span>⌕</span><h3>No requests found</h3><p>Try changing or clearing your filters.</p></div></div></div>
+        </section>
+
+        <section class="view" id="csp-queue-view" data-title="CSP Queue">
+          <div class="page-intro"><div><h2>CSP Processing Queue</h2><p>Demo workspace for receiving and processing BDT requests.</p></div><span class="role-preview">CSP role preview</span></div>
+          <div class="stats-grid compact" id="queue-stats"></div>
+          <div class="panel"><div class="panel-header"><div><h2>Active Queue</h2><p>Requests are ordered by age, oldest first.</p></div><span class="live-indicator"><i></i> Demo data</span></div><div class="table-wrap"><table><thead><tr><th>Age</th><th>Ticket</th><th>Brand</th><th>Request</th><th>Player / Details</th><th>Requested By</th><th>Status</th><th>Handler</th><th>Action</th></tr></thead><tbody id="queue-table"></tbody></table><div class="empty-state" id="queue-empty" hidden><span>✓</span><h3>Queue is clear</h3><p>There are no active requests right now.</p></div></div></div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div class="sidebar-overlay" id="sidebar-overlay"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <div class="modal-backdrop" id="details-modal" hidden>
+    <section class="modal details-modal" role="dialog" aria-modal="true" aria-labelledby="details-title"><button class="modal-close" data-close-modal aria-label="Close">×</button><div id="details-content"></div></section>
+  </div>
+  <div class="modal-backdrop" id="unable-modal" hidden>
+    <section class="modal small-modal" role="dialog" aria-modal="true" aria-labelledby="unable-title"><button class="modal-close" data-close-modal aria-label="Close">×</button><div class="modal-heading"><span class="modal-icon danger">!</span><div><p class="eyebrow">Update request</p><h2 id="unable-title">Mark as unable</h2></div></div><p>Select a reason why this request cannot be completed.</p><form id="unable-form"><input type="hidden" id="unable-ticket"><div class="field"><label for="unable-reason">Reason <em>*</em></label><select id="unable-reason" required><option value="">Select a reason</option><option>Incorrect information</option><option>Player not found</option><option>Number already used</option><option>KYC issue</option><option>Back-office restriction</option><option>Duplicate request</option><option>Other</option></select></div><div class="field" id="other-reason-field" hidden><label for="other-reason">Details <em>*</em></label><textarea id="other-reason" rows="3" placeholder="Enter a brief reason"></textarea></div><div class="modal-actions"><button class="secondary-button" type="button" data-close-modal>Cancel</button><button class="danger-button" type="submit">Mark Unable</button></div></form></section>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
