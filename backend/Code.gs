@@ -107,6 +107,11 @@ function handleApi_(e, method) {
       cancelRequest: function () { return success_(cancelRequest_(input)); },
       requestDetails: function () { return success_(requestDetails_(input)); },
       dashboard: function () { return success_(dashboard_(input)); },
+      listUsers: function () { return success_(listUsers_(input)); },
+      createUser: function () { return success_(createUser_(input)); },
+      updateUser: function () { return success_(updateUser_(input)); },
+      resetUserPassword: function () { return success_(resetUserPassword_(input)); },
+      setUserStatus: function () { return success_(setUserStatus_(input)); },
     };
 
     if (!actions[action]) throw new ApiError_("Unknown action.", "UNKNOWN_ACTION");
@@ -389,6 +394,115 @@ function dashboard_(input) {
   return { metrics: counts, recentRequests: recent };
 }
 
+function listUsers_(input) {
+  requireRole_(input.token, [ROLES.SUPER]);
+  const users = readRows_(SHEETS.USERS)
+    .slice()
+    .sort(function (a, b) { return cleanString_(a.User_ID, 100).localeCompare(cleanString_(b.User_ID, 100)); })
+    .map(safeUser_);
+  return { users: users, count: users.length };
+}
+
+function createUser_(input) {
+  requireRole_(input.token, [ROLES.SUPER]);
+  const name = cleanString_(input.name, 150);
+  const username = normalizeUsername_(input.username);
+  const password = typeof input.password === "string" ? input.password : "";
+  const team = cleanString_(input.team, 50).toUpperCase();
+  const role = cleanString_(input.role, 50).toUpperCase();
+  if (!name || !username || !password) throw new ApiError_("Name, username, and password are required.", "VALIDATION_ERROR");
+  validateUsername_(username);
+  validateTeamRole_(team, role);
+  validateApiPassword_(password);
+  const passwordHash = hashPassword_(password);
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const table = getTable_(SHEETS.USERS);
+    if (table.rows.some(function (user) { return normalizeUsername_(user.Username) === username; })) {
+      throw new ApiError_("That username is already in use.", "DUPLICATE_USERNAME");
+    }
+    const now = new Date();
+    const user = {
+      User_ID: nextUserId_(table.rows), Name: name, Username: username,
+      Password_Hash: passwordHash, Team: team, Role: role, Status: "Active",
+      Created_At: now, Updated_At: now, Last_Login: "",
+    };
+    appendObjectRow_(table, user);
+    return { user: safeUser_(user) };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function updateUser_(input) {
+  const session = requireRole_(input.token, [ROLES.SUPER]);
+  const userId = requireUserId_(input.userId);
+  const name = cleanString_(input.name, 150);
+  const team = cleanString_(input.team, 50).toUpperCase();
+  const role = cleanString_(input.role, 50).toUpperCase();
+  if (!name) throw new ApiError_("Name is required.", "VALIDATION_ERROR");
+  validateTeamRole_(team, role);
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const table = getTable_(SHEETS.USERS);
+    const user = findUserInTable_(table, userId);
+    if (user.Role === ROLES.SUPER && user.Status === "Active" && role !== ROLES.SUPER) ensureAnotherActiveSuperAdmin_(table.rows, userId);
+    const updates = { Name: name, Team: team, Role: role, Updated_At: new Date() };
+    updateObjectRow_(table, user._row, updates);
+    if (userId === session.userId && role !== session.role) invalidateUserSessions_(userId);
+    return { user: safeUser_(mergeObjects_(user, updates)) };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function resetUserPassword_(input) {
+  requireRole_(input.token, [ROLES.SUPER]);
+  const userId = requireUserId_(input.userId);
+  const password = typeof input.newPassword === "string" ? input.newPassword : "";
+  validateApiPassword_(password);
+  const passwordHash = hashPassword_(password);
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const table = getTable_(SHEETS.USERS);
+    const user = findUserInTable_(table, userId);
+    const updates = { Password_Hash: passwordHash, Updated_At: new Date() };
+    updateObjectRow_(table, user._row, updates);
+    invalidateUserSessions_(userId);
+    return { message: "Password updated successfully." };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function setUserStatus_(input) {
+  const session = requireRole_(input.token, [ROLES.SUPER]);
+  const userId = requireUserId_(input.userId);
+  const status = cleanString_(input.status, 20);
+  if (["Active", "Inactive"].indexOf(status) === -1) throw new ApiError_("Status must be Active or Inactive.", "VALIDATION_ERROR");
+  if (userId === session.userId && status === "Inactive") throw new ApiError_("You cannot deactivate your own account.", "SELF_DEACTIVATION");
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const table = getTable_(SHEETS.USERS);
+    const user = findUserInTable_(table, userId);
+    if (user.Role === ROLES.SUPER && user.Status === "Active" && status === "Inactive") ensureAnotherActiveSuperAdmin_(table.rows, userId);
+    const updates = { Status: status, Updated_At: new Date() };
+    updateObjectRow_(table, user._row, updates);
+    if (status === "Inactive") invalidateUserSessions_(userId);
+    return { user: safeUser_(mergeObjects_(user, updates)) };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function setUserPassword(username, newPassword) {
   const normalizedUsername = cleanString_(username, 100).toLowerCase();
   if (!normalizedUsername) throw new Error("A username is required.");
@@ -409,6 +523,106 @@ function setUserPassword(username, newPassword) {
 
 function setSamplePasswordsForTesting() {
   throw new Error("No sample passwords are embedded. Run setUserPassword(username, newPassword) manually for each test user.");
+}
+
+function safeUser_(user) {
+  return {
+    userId: cleanString_(user.User_ID, 100),
+    name: cleanString_(user.Name, 150),
+    username: cleanString_(user.Username, 100),
+    team: cleanString_(user.Team, 50),
+    role: cleanString_(user.Role, 50),
+    status: cleanString_(user.Status, 30),
+    createdAt: user.Created_At || "",
+    updatedAt: user.Updated_At || "",
+    lastLogin: user.Last_Login || "",
+  };
+}
+
+function normalizeUsername_(value) {
+  return cleanString_(value, 100).toLowerCase();
+}
+
+function validateUsername_(username) {
+  if (!/^[a-z0-9][a-z0-9._-]{2,49}$/.test(username)) {
+    throw new ApiError_("Username must be 3–50 characters and use only letters, numbers, dots, underscores, or hyphens.", "VALIDATION_ERROR");
+  }
+}
+
+function validateApiPassword_(password) {
+  try {
+    validateNewPassword_(password);
+  } catch (error) {
+    throw new ApiError_("Password must be between 12 and 256 characters.", "VALIDATION_ERROR");
+  }
+}
+
+function validateTeamRole_(team, role) {
+  const expectedTeams = {};
+  expectedTeams[ROLES.BDT] = "BDT";
+  expectedTeams[ROLES.CSP] = "CSP";
+  expectedTeams[ROLES.CSP_ADMIN] = "CSP";
+  expectedTeams[ROLES.SUPER] = "ADMIN";
+  if (!expectedTeams[role] || expectedTeams[role] !== team) {
+    throw new ApiError_("The selected team and role combination is not valid.", "INVALID_TEAM_ROLE");
+  }
+}
+
+function requireUserId_(value) {
+  const userId = cleanString_(value, 100);
+  if (!/^USR\d+$/.test(userId)) throw new ApiError_("A valid user ID is required.", "VALIDATION_ERROR");
+  return userId;
+}
+
+function findUserInTable_(table, userId) {
+  const user = table.rows.find(function (row) { return cleanString_(row.User_ID, 100) === userId; });
+  if (!user) throw new ApiError_("User not found.", "NOT_FOUND");
+  return user;
+}
+
+function nextUserId_(existingRows) {
+  let maximum = 0;
+  const used = {};
+  existingRows.forEach(function (row) {
+    const id = cleanString_(row.User_ID, 100);
+    used[id] = true;
+    const match = id.match(/^USR(\d+)$/);
+    if (match) maximum = Math.max(maximum, Number(match[1]));
+  });
+  let number = Math.max(1, maximum + 1);
+  let id = "USR" + String(number).padStart(3, "0");
+  while (used[id]) {
+    number += 1;
+    id = "USR" + String(number).padStart(3, "0");
+  }
+  return id;
+}
+
+function ensureAnotherActiveSuperAdmin_(users, excludedUserId) {
+  const anotherExists = users.some(function (user) {
+    return cleanString_(user.User_ID, 100) !== excludedUserId &&
+      cleanString_(user.Role, 50) === ROLES.SUPER &&
+      cleanString_(user.Status, 30) === "Active";
+  });
+  if (!anotherExists) throw new ApiError_("At least one active Super Admin account must remain.", "LAST_SUPER_ADMIN");
+}
+
+function invalidateUserSessions_(userId) {
+  const properties = PropertiesService.getScriptProperties();
+  const all = properties.getProperties();
+  Object.keys(all).forEach(function (key) {
+    if (key.indexOf("SESSION_") !== 0) return;
+    try {
+      const session = JSON.parse(all[key]);
+      if (session && session.userId === userId) {
+        properties.deleteProperty(key);
+        CacheService.getScriptCache().remove(key);
+      }
+    } catch (error) {
+      properties.deleteProperty(key);
+      CacheService.getScriptCache().remove(key);
+    }
+  });
 }
 
 function createSession_(session) {
