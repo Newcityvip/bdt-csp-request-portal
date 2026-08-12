@@ -1,6 +1,7 @@
 const catalogState = { brands: [], requestTypes: [] };
 const requestState = { dashboard: null, my: [], team: [], queue: [], loading: {}, loaded: {}, sequence: {}, mutating: {}, duplicatePayload: null, activeDetailId: null, refreshTimer: null, lastAutoRefresh: 0, filterTimers: {} };
-const API_URL = "https://script.google.com/macros/s/AKfycbyanyavF31y_Z-q0PIjZkYJJCVZPmWXQgtJiuJh2KboaeHi4PSQwFpNqw8c7Lqn91vn/exec";
+const API_URL = "/api";
+const API_TIMEOUT_MS = 15000;
 const TOKEN_STORAGE_KEY = "opsRequestHubSession";
 const ROLE_ACCESS = {
   BDT_STAFF: { views: ["dashboard", "new-request", "my-requests", "team-requests"], defaultView: "dashboard", label: "BDT Staff" },
@@ -31,16 +32,22 @@ function fillSelect(select, values) { values.forEach(value => select.insertAdjac
 function showToast(message) { const toast=$("#toast"); toast.textContent=message; toast.classList.add("show"); clearTimeout(showToast.timer); showToast.timer=setTimeout(()=>toast.classList.remove("show"),3200); }
 
 async function apiPost(action, payload = {}, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeout || API_TIMEOUT_MS);
   let response;
   try {
     response = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       cache: "no-store",
-      body: JSON.stringify({ action, ...payload })
+      body: JSON.stringify({ action, ...payload }),
+      signal: controller.signal
     });
-  } catch {
+  } catch (error) {
+    if (error?.name === "AbortError") throw new ApiError(options.timeoutMessage || "The service is taking too long. Please try again.", "TIMEOUT");
     throw new ApiError("Unable to reach the service. Please try again.", "NETWORK_ERROR");
+  } finally {
+    clearTimeout(timeout);
   }
 
   let result;
@@ -56,21 +63,7 @@ async function apiPost(action, payload = {}, options = {}) {
 }
 
 async function apiGet(action, params = {}, options = {}) {
-  const url = new URL(API_URL);
-  url.searchParams.set("action", action);
-  Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== null) url.searchParams.set(key, value); });
-  let response;
-  try { response = await fetch(url.toString(), { cache: "no-store" }); }
-  catch { throw new ApiError("Unable to reach the service. Please try again.", "NETWORK_ERROR"); }
-  let result;
-  try { result = await response.json(); }
-  catch { throw new ApiError("The service returned an invalid response. Please try again.", "INVALID_RESPONSE"); }
-  if (!result || result.ok !== true) {
-    const code = result?.code || "REQUEST_ERROR";
-    if (!options.skipExpiry && ["UNAUTHORIZED", "SESSION_EXPIRED"].includes(code)) handleSessionExpiry();
-    throw new ApiError(typeof result?.error === "string" ? result.error : "The request could not be completed.", code, result?.data);
-  }
-  return result.data;
+  return apiPost(action, params, options);
 }
 
 function authenticatedPost(action, payload = {}) {
@@ -158,10 +151,13 @@ function replaceOptions(select,values,first){if(!select)return;select.innerHTML=
 function renderDynamicFields(type){const container=$("#dynamic-fields"),definition=catalogState.requestTypes.find(x=>x.requestType===type);if(!definition){container.innerHTML='<div class="form-placeholder"><span>↖</span><p>Select a request type to see the required details.</p></div>';return}const required=definition.requiredFields||[],fields=[...required,...(definition.optionalFields||[]).filter(x=>!required.includes(x))].filter(x=>FIELD_META[x]);container.innerHTML=`<div class="form-section-title"><span>2</span><div><h3>Request details</h3><p>Provide accurate information for ${escapeHtml(type.toLowerCase())}.</p></div></div><div class="form-grid two">${fields.map(name=>{const [key,label,inputType]=FIELD_META[name],req=required.includes(name);return `<div class="field ${inputType==="textarea"?"full-width":""}"><label for="field-${key}">${label}${req?' <em>*</em>':''}</label>${inputType==="textarea"?`<textarea id="field-${key}" name="${key}" rows="3" ${req?"required":""}></textarea>`:`<input id="field-${key}" name="${key}" type="${inputType}" ${req?"required":""}>`}<small class="error-text">This field is required.</small></div>`}).join("")}</div>`;}
 function requestPayloadFromForm(){const data=new FormData($("#request-form")),payload={brand:data.get("brand"),requestType:data.get("requestType")};for(const meta of Object.values(FIELD_META)){const value=data.get(meta[0]);if(value!==null&&String(value).trim())payload[meta[0]]=String(value).trim()}return payload}
 async function submitRequest(event){event.preventDefault();const form=event.currentTarget;if(!form.checkValidity()){form.reportValidity();return}await createLiveRequest(requestPayloadFromForm(),false,form)}
-async function createLiveRequest(payload,confirmDuplicate,form=$("#request-form")){setFormBusy(form,true,"Submitting…");try{const data=await authenticatedPost("createRequest",{...payload,confirmDuplicate});if(data.duplicateWarning&&!confirmDuplicate){requestState.duplicatePayload=payload;renderDuplicates(data.similarRequests||[]);openModal("duplicate-modal");return}const ticket=data.ticket||data.request?.Request_ID;form.reset();renderDynamicFields("");showToast(`Request ${ticket} submitted successfully.`);navigate("my-requests");await Promise.all([loadRequestList("my"),loadDashboard()]);}catch(e){showToast(e.message)}finally{setFormBusy(form,false)}}
+async function createLiveRequest(payload,confirmDuplicate,form=$("#request-form")){setFormBusy(form,true,"Submitting…");try{const data=await authenticatedPost("createRequest",{...payload,confirmDuplicate});if(data.duplicateWarning&&!confirmDuplicate){requestState.duplicatePayload=payload;renderDuplicates(data.similarRequests||[]);openModal("duplicate-modal");return}const ticket=data.ticket||data.request?.Request_ID;form.reset();renderDynamicFields("");showToast(`Request ${ticket} submitted successfully.`);navigate("my-requests");Promise.allSettled([loadRequestList("my"),loadDashboard({silent:true})]);}catch(e){showToast(e.message)}finally{setFormBusy(form,false)}}
 function renderDuplicates(items){$("#duplicate-list").innerHTML=items.map(r=>`<div class="duplicate-item"><strong>${escapeHtml(r.requestId)}</strong><span>${escapeHtml(r.brand)} · ${escapeHtml(r.requestType)} · ${escapeHtml(r.status)}</span><small>${escapeHtml(r.requestedBy||"—")} · ${escapeHtml(formatDate(r.requestedAt))}</small></div>`).join("")}
 function detailsActionBar(raw){const r=normalizeRequest(raw),csp=["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role),canFinish=r.status==="Processing"&&(authState.user.role!=="CSP_STAFF"||r.takenById===authState.user.userId);if(!csp)return "";if(r.status==="Pending")return `<div class="details-action-bar"><button class="primary-button" data-take="${escapeHtml(r.requestId)}">Take Request</button></div>`;if(canFinish)return `<div class="details-action-bar"><span>Processing by ${escapeHtml(r.takenByName||authState.user.name)}</span><div><button class="action-button success" data-complete="${escapeHtml(r.requestId)}">Complete</button><button class="action-button danger" data-unable="${escapeHtml(r.requestId)}">Unable</button></div></div>`;if(r.status==="Processing")return `<div class="details-action-bar"><span>Processing by ${escapeHtml(r.takenByName||"another CSP staff member")}</span></div>`;return ""}
-async function openDetails(ticket){requestState.activeDetailId=ticket;$("#details-content").innerHTML='<div class="details-body table-loading">Loading request details…</div>';openModal("details-modal");try{const data=await authenticatedPost("requestDetails",{requestId:ticket}),r=data.request||{};if(requestState.activeDetailId!==ticket)return;const fields=["Brand","Player_Username","Affiliate_Username","Phone_Number","Email","Current_Email","New_Email","Current_Name","New_Full_Name","Current_Player_Username","New_Player_Username","Transaction_ID","Amount","Notes","Requested_By_Name","Requested_At","Taken_By_Name","Taken_At","Completed_By_Name","Completed_At","Unable_Reason","Waiting_Seconds","Handling_Seconds","Total_Seconds"].filter(k=>r[k]!==""&&r[k]!=null);const timing=["Waiting_Seconds","Handling_Seconds","Total_Seconds"];$("#details-content").innerHTML=`<div class="details-head">${statusBadge(r.Status)}<h2 id="details-title">${escapeHtml(r.Request_ID)}</h2><p>${escapeHtml(r.Request_Type)}</p></div><div class="details-body"><div class="detail-grid">${fields.map(k=>{const label=(FIELD_META[k]?.[1]||DETAIL_LABELS[k]||k.replaceAll("_"," ")),value=timing.includes(k)?formatDuration(r[k]):k.endsWith("_At")?formatDate(r[k]):r[k],copy=FIELD_META[k]&&!timing.includes(k);return `<div class="detail-item"><label>${escapeHtml(label)}</label><div class="detail-value"><span>${escapeHtml(value)}</span>${copy?`<button class="copy-button" data-copy="${escapeHtml(value)}">Copy</button>`:""}</div></div>`}).join("")}</div>${detailsActionBar(r)}<div class="history-timeline"><h3>Request History</h3>${(data.history||[]).map(h=>`<div class="history-entry"><i></i><div><strong>${escapeHtml(h.Action)}</strong><span>${escapeHtml(h.Performed_By_Name||"System")} · ${escapeHtml(formatDate(h.Created_At))}</span>${h.Details?`<p>${escapeHtml(h.Details)}</p>`:""}</div></div>`).join("")||"<p>No history available.</p>"}</div></div>`;}catch(e){closeModals();showToast(e.message)}}
+function cachedRequest(ticket){return requestState.queue.find(r=>r.requestId===ticket)?.raw||[...requestState.my,...requestState.team].find(r=>getField(r,"Request_ID")===ticket)||requestState.dashboard?.recentRequests?.find(r=>getField(r,"Request_ID")===ticket)}
+function detailsSkeleton(ticket){const raw=cachedRequest(ticket),r=raw?normalizeRequest(raw):null;return `<div class="details-head">${r?statusBadge(r.status):'<span class="skeleton skeleton-badge"></span>'}<h2 id="details-title">${escapeHtml(r?.requestId||ticket)}</h2><p>${escapeHtml(r?[r.brand,r.requestType].filter(Boolean).join(" · "):"Loading request overview…")}</p></div><div class="details-body"><div class="detail-skeleton" aria-label="Loading request details"><span></span><span></span><span></span><span></span></div></div>`}
+function renderDetails(data){const r=data.request||{},fields=["Brand","Player_Username","Affiliate_Username","Phone_Number","Email","Current_Email","New_Email","Current_Name","New_Full_Name","Current_Player_Username","New_Player_Username","Transaction_ID","Amount","Notes","Requested_By_Name","Requested_At","Taken_By_Name","Taken_At","Completed_By_Name","Completed_At","Unable_Reason","Waiting_Seconds","Handling_Seconds","Total_Seconds"].filter(k=>r[k]!==""&&r[k]!=null),timing=["Waiting_Seconds","Handling_Seconds","Total_Seconds"];$("#details-content").innerHTML=`<div class="details-head">${statusBadge(r.Status)}<h2 id="details-title">${escapeHtml(r.Request_ID)}</h2><p>${escapeHtml([r.Brand,r.Request_Type].filter(Boolean).join(" · "))}</p></div><div class="details-body"><h3 class="details-section-title">Request information</h3><div class="detail-grid">${fields.map(k=>{const label=(FIELD_META[k]?.[1]||DETAIL_LABELS[k]||k.replaceAll("_"," ")),value=timing.includes(k)?formatDuration(r[k]):k.endsWith("_At")?formatDate(r[k]):r[k],copy=FIELD_META[k]&&!timing.includes(k);return `<div class="detail-item"><label>${escapeHtml(label)}</label><div class="detail-value"><span>${escapeHtml(value)}</span>${copy?`<button class="copy-button" data-copy="${escapeHtml(value)}">Copy</button>`:""}</div></div>`}).join("")}</div>${detailsActionBar(r)}<div class="history-timeline"><h3>Activity timeline</h3>${(data.history||[]).map(h=>`<div class="history-entry"><i></i><div><strong>${escapeHtml(h.Action)}</strong><span>${escapeHtml(h.Performed_By_Name||"System")} · ${escapeHtml(formatDate(h.Created_At))}</span>${h.Details?`<p>${escapeHtml(h.Details)}</p>`:""}</div></div>`).join("")||"<p>No activity recorded.</p>"}</div></div>`}
+async function openDetails(ticket){requestState.activeDetailId=ticket;$("#details-content").innerHTML=detailsSkeleton(ticket);openModal("details-modal");try{const data=await authenticatedPost("requestDetails",{requestId:ticket});if(requestState.activeDetailId!==ticket)return;renderDetails(data)}catch(e){if(requestState.activeDetailId!==ticket)return;$("#details-content").innerHTML=`<div class="details-error"><span>!</span><h2 id="details-title">Unable to load request details</h2><p>${escapeHtml(e.message)}</p><div><button class="secondary-button" data-close-modal>Close</button><button class="primary-button" data-retry-details="${escapeHtml(ticket)}">Retry</button></div></div>`}}
 function openModal(id){const modal=$(`#${id}`);modal.hidden=false;document.body.style.overflow="hidden";setTimeout(()=>$(".modal-close",modal).focus(),0)}
 function closeModals(){ $$(".modal-backdrop").forEach(m=>m.hidden=true); clearSensitiveFields(); document.body.style.overflow=""; }
 async function copyValue(value){try{await navigator.clipboard.writeText(value);showToast("Copied to clipboard.")}catch{showToast("Clipboard access is unavailable in this browser.")}}
@@ -196,7 +192,7 @@ function findAdminUser(userId) { return adminState.users.find(user => user.userI
 async function loadUsers() {
   if (authState.user?.role !== "SUPER_ADMIN") return;
   $("#user-result-summary").textContent = "Loading users…";
-  $("#users-table").innerHTML = '<tr class="table-loading"><td colspan="9">Loading user accounts…</td></tr>';
+  $("#users-table").innerHTML = '<tr class="table-loading"><td colspan="10">Loading user accounts…</td></tr>';
   $("#users-empty").hidden = true;
   try {
     const data = await authenticatedPost("listUsers");
@@ -227,7 +223,7 @@ function renderUsers() {
   $("#csp-users").textContent = adminState.users.filter(user => user.team === "CSP").length;
   $("#inactive-users").textContent = adminState.users.filter(user => user.status === "Inactive").length;
   $("#user-result-summary").textContent = `Showing ${filtered.length} of ${adminState.users.length} users`;
-  $("#users-table").innerHTML = filtered.map(user => `<tr><td><strong>${escapeHtml(user.userId)}</strong></td><td><strong>${escapeHtml(user.name)}</strong></td><td><span class="username-text">${escapeHtml(user.username)}</span></td><td>${escapeHtml(user.team)}</td><td><span class="user-role">${escapeHtml(roleLabel(user.role))}</span></td><td>${statusBadge(user.status || "Inactive")}</td><td>${escapeHtml(formatAdminDate(user.lastLogin))}</td><td>${escapeHtml(formatAdminDate(user.updatedAt))}</td><td><div class="user-actions"><button class="action-button" data-edit-user="${escapeHtml(user.userId)}">Edit</button><button class="action-button primary" data-reset-user="${escapeHtml(user.userId)}">Reset Password</button><button class="action-button ${user.status === "Active" ? "danger" : "success"} status-button" data-status-user="${escapeHtml(user.userId)}">${user.status === "Active" ? "Deactivate" : "Activate"}</button></div></td></tr>`).join("");
+  $("#users-table").innerHTML = filtered.map(user => `<tr><td><strong>${escapeHtml(user.userId)}</strong></td><td><strong>${escapeHtml(user.name)}</strong></td><td><span class="username-text">${escapeHtml(user.username)}</span></td><td>${escapeHtml(user.team)}</td><td><span class="user-role">${escapeHtml(roleLabel(user.role))}</span></td><td>${statusBadge(user.status || "Inactive")}</td><td><span class="password-version">${escapeHtml(user.passwordVersion || "unknown")}</span></td><td>${escapeHtml(formatAdminDate(user.lastLogin))}</td><td>${escapeHtml(formatAdminDate(user.updatedAt))}</td><td><div class="user-actions"><button class="action-button" data-edit-user="${escapeHtml(user.userId)}">Edit</button><button class="action-button primary" data-reset-user="${escapeHtml(user.userId)}">Reset Password</button><button class="action-button ${user.status === "Active" ? "danger" : "success"} status-button" data-status-user="${escapeHtml(user.userId)}">${user.status === "Active" ? "Deactivate" : "Activate"}</button></div></td></tr>`).join("");
   $("#users-empty").hidden = filtered.length > 0;
   if (!filtered.length) { $("#users-empty h3").textContent = "No users found"; $("#users-empty p").textContent = "Try changing or clearing your filters."; }
 }
@@ -328,12 +324,12 @@ async function restoreSession() {
   const token = localStorage.getItem(TOKEN_STORAGE_KEY);
   if (!token) { showLogin(); return; }
   try {
-    const data = await apiPost("session", { token }, { skipExpiry: true });
+    const data = await apiPost("session", { token }, { skipExpiry: true, timeoutMessage: "Unable to restore your previous session." });
     if (!data?.user) throw new ApiError("Invalid session.", "UNAUTHORIZED");
     showPortal(data.user, token);
   } catch {
     clearAuth();
-    showLogin();
+    showLogin("Unable to restore your previous session. Please sign in again.");
   }
 }
 
@@ -349,7 +345,7 @@ async function submitLogin(event) {
   button.disabled = true;
   button.textContent = "Signing In…";
   try {
-    const data = await apiPost("login", { username, password }, { skipExpiry: true });
+    const data = await apiPost("login", { username, password }, { skipExpiry: true, timeoutMessage: "Sign in is taking too long. Please try again." });
     if (!data?.token || !data?.user) throw new ApiError("Invalid login response.", "INVALID_RESPONSE");
     localStorage.setItem(TOKEN_STORAGE_KEY, data.token);
     form.reset();
@@ -373,9 +369,10 @@ async function logout() {
 }
 
 async function mutateRequest(action, requestId, payload, successMessage, button, options={}) {
-  if (button) { button.disabled=true; button.dataset.oldText=button.textContent; button.textContent="Working…"; }
+  const busyLabels={takeRequest:"Taking…",completeRequest:"Completing…",unableRequest:"Updating…",cancelRequest:"Cancelling…"};
+  if (button) { button.disabled=true; button.dataset.oldText=button.textContent; button.textContent=busyLabels[action]||"Working…"; }
   if(["takeRequest","completeRequest","unableRequest"].includes(action))requestState.mutating.queue=true;
-  try { const result=await authenticatedPost(action,{requestId,...payload});if(action==="takeRequest"&&result?.request){const updated=normalizeRequest(result.request),index=requestState.queue.findIndex(r=>r.requestId===requestId);if(index>=0)requestState.queue[index]=updated;renderQueueRows();}closeModals();showToast(successMessage);requestState.mutating.queue=false;await Promise.all([loadDashboard({silent:true}),allowedViews().includes("csp-queue")?loadQueue({silent:true}):Promise.resolve(),allowedViews().includes("my-requests")?loadRequestList("my",{silent:true}):Promise.resolve(),allowedViews().includes("team-requests")?loadRequestList("team",{silent:true}):Promise.resolve()]);if(action==="takeRequest"||options.reopenDetails)await openDetails(requestId); }
+  try { const result=await authenticatedPost(action,{requestId,...payload});if(result?.request){const updated=normalizeRequest(result.request),index=requestState.queue.findIndex(r=>r.requestId===requestId);if(index>=0){if(["Completed","Unable","Cancelled"].includes(updated.status))requestState.queue.splice(index,1);else requestState.queue[index]=updated;renderQueueRows();}}closeModals();showToast(successMessage);requestState.mutating.queue=false;if(action==="takeRequest"||options.reopenDetails)openDetails(requestId);Promise.allSettled([loadDashboard({silent:true}),allowedViews().includes("csp-queue")?loadQueue({silent:true}):Promise.resolve(),allowedViews().includes("my-requests")?loadRequestList("my",{silent:true}):Promise.resolve(),allowedViews().includes("team-requests")?loadRequestList("team",{silent:true}):Promise.resolve()]); }
   catch(e){const handler=e.data?.handler?` Current handler: ${e.data.handler}.`:"";showToast(`${e.message}${handler}`);if(action==="takeRequest")setTimeout(()=>loadQueue({silent:true}),0)}
   finally { requestState.mutating.queue=false;if(button){button.disabled=false;button.textContent=button.dataset.oldText||"Confirm"} }
 }
@@ -391,7 +388,7 @@ function initialize() {
   $("#unable-reason").addEventListener("change",e=>{$("#other-reason-field").hidden=e.target.value!=="Other";$("#other-reason").required=e.target.value==="Other"});
   $("#unable-form").addEventListener("submit",async e=>{e.preventDefault();if(!e.currentTarget.checkValidity()){e.currentTarget.reportValidity();return}const reason=$("#unable-reason").value==="Other"?$("#other-reason").value.trim():$("#unable-reason").value;await mutateRequest("unableRequest",$("#unable-ticket").value,{reason},`Request ${$("#unable-ticket").value} marked unable.`,$('button[type="submit"]',e.currentTarget),{reopenDetails:requestState.reopenAfterMutation});requestState.reopenAfterMutation=false;e.currentTarget.reset();$("#other-reason-field").hidden=true});
   $("#submit-duplicate-button").addEventListener("click",async e=>{if(!requestState.duplicatePayload)return;const payload=requestState.duplicatePayload;requestState.duplicatePayload=null;closeModals();await createLiveRequest(payload,true,$("#request-form"))});
-  document.addEventListener("click",e=>{const ticket=e.target.closest("[data-ticket]")?.dataset.ticket;if(ticket)openDetails(ticket);const take=e.target.closest("[data-take]")?.dataset.take;if(take&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role))mutateRequest("takeRequest",take,{},`Request ${take} is now processing.`,e.target);const complete=e.target.closest("[data-complete]")?.dataset.complete;if(complete&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role)){const reopen=!!e.target.closest("#details-modal");confirmRequestAction("Complete Request",`Mark ${complete} as completed?`,"Complete Request",button=>mutateRequest("completeRequest",complete,{},`Request ${complete} completed.`,button,{reopenDetails:reopen}))}const unable=e.target.closest("[data-unable]")?.dataset.unable;if(unable&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role)){requestState.reopenAfterMutation=!!e.target.closest("#details-modal");$("#unable-ticket").value=unable;openModal("unable-modal")}const cancel=e.target.closest("[data-cancel]")?.dataset.cancel;if(cancel&&["BDT_STAFF","SUPER_ADMIN"].includes(authState.user.role))confirmRequestAction("Cancel Request",`Cancel pending request ${cancel}?`,"Cancel Request",button=>mutateRequest("cancelRequest",cancel,{},`Request ${cancel} cancelled.`,button));if(e.target.closest("[data-retry-queue]"))loadQueue();if(e.target.closest("[data-close-modal]")||e.target.classList.contains("modal-backdrop"))closeModals();const copy=e.target.closest("[data-copy]")?.dataset.copy;if(copy)copyValue(copy)});
+  document.addEventListener("click",e=>{const ticket=e.target.closest("[data-ticket]")?.dataset.ticket;if(ticket)openDetails(ticket);const retryDetails=e.target.closest("[data-retry-details]")?.dataset.retryDetails;if(retryDetails)openDetails(retryDetails);const take=e.target.closest("[data-take]")?.dataset.take;if(take&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role))mutateRequest("takeRequest",take,{},`Request ${take} is now processing.`,e.target);const complete=e.target.closest("[data-complete]")?.dataset.complete;if(complete&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role)){const reopen=!!e.target.closest("#details-modal");confirmRequestAction("Complete Request",`Mark ${complete} as completed?`,"Complete Request",button=>mutateRequest("completeRequest",complete,{},`Request ${complete} completed.`,button,{reopenDetails:reopen}))}const unable=e.target.closest("[data-unable]")?.dataset.unable;if(unable&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role)){requestState.reopenAfterMutation=!!e.target.closest("#details-modal");$("#unable-ticket").value=unable;openModal("unable-modal")}const cancel=e.target.closest("[data-cancel]")?.dataset.cancel;if(cancel&&["BDT_STAFF","SUPER_ADMIN"].includes(authState.user.role))confirmRequestAction("Cancel Request",`Cancel pending request ${cancel}?`,"Cancel Request",button=>mutateRequest("cancelRequest",cancel,{},`Request ${cancel} cancelled.`,button));if(e.target.closest("[data-retry-queue]"))loadQueue();if(e.target.closest("[data-close-modal]")||e.target.classList.contains("modal-backdrop"))closeModals();const copy=e.target.closest("[data-copy]")?.dataset.copy;if(copy)copyValue(copy)});
   document.addEventListener("keydown",e=>{if(e.key==="Escape")closeModals()});
   window.addEventListener("hashchange", () => { if (authState.user) navigate(location.hash.slice(1)); });
   $("#login-form").addEventListener("submit", submitLogin);

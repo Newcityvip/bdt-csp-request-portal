@@ -12,6 +12,7 @@ const SHEETS = {
   TYPES: "Request_Types",
   BRANDS: "Brands",
   CONFIG: "Config",
+  // Reference/admin data only. Cloudflare ALLOWED_IPS is the authoritative edge access list.
   ALLOWED_IPS: "Allowed_IPs",
 };
 
@@ -34,9 +35,9 @@ const ROLES = {
 
 const SESSION_SECONDS = 8 * 60 * 60;
 const SESSION_CACHE_SECONDS = 6 * 60 * 60;
-const PASSWORD_VERSION = "v2";
-const PASSWORD_ITERATIONS = 1500;
-const LEGACY_PASSWORD_VERSION = "v1";
+const PASSWORD_VERSION = "v3";
+const PASSWORD_ITERATIONS = 500;
+const SUPPORTED_PASSWORD_VERSIONS = ["v1", "v2", "v3"];
 const MAX_LIMIT = 500;
 const ACTIVE_REQUEST_STATUSES = ["Pending", "Processing"];
 
@@ -531,6 +532,7 @@ function setSamplePasswordsForTesting() {
 }
 
 function safeUser_(user) {
+  const passwordVersion = cleanString_(user.Password_Hash, 1000).split("$")[0];
   return {
     userId: cleanString_(user.User_ID, 100),
     name: cleanString_(user.Name, 150),
@@ -541,6 +543,7 @@ function safeUser_(user) {
     createdAt: user.Created_At || "",
     updatedAt: user.Updated_At || "",
     lastLogin: user.Last_Login || "",
+    passwordVersion: SUPPORTED_PASSWORD_VERSIONS.indexOf(passwordVersion) >= 0 ? passwordVersion : "unknown",
   };
 }
 
@@ -698,16 +701,16 @@ function hashPassword_(password) {
 
 function verifyPassword_(password, stored) {
   const parts = cleanString_(stored, 1000).split("$");
-  if (parts.length !== 4 || [LEGACY_PASSWORD_VERSION, PASSWORD_VERSION].indexOf(parts[0]) === -1) return false;
+  if (parts.length !== 4 || SUPPORTED_PASSWORD_VERSIONS.indexOf(parts[0]) === -1) return false;
   const iterations = Number(parts[1]);
-  if (!Number.isInteger(iterations) || iterations < 1000 || iterations > 100000) return false;
+  if (!Number.isInteger(iterations) || iterations < 250 || iterations > 100000) return false;
   const calculated = derivePasswordHash_(password, parts[2], iterations);
   return constantTimeEqual_(calculated, parts[3]);
 }
 
 function passwordHashNeedsUpgrade_(stored) {
   const parts = cleanString_(stored, 1000).split("$");
-  return parts.length === 4 && parts[0] === LEGACY_PASSWORD_VERSION;
+  return parts.length === 4 && (parts[0] !== PASSWORD_VERSION || Number(parts[1]) !== PASSWORD_ITERATIONS);
 }
 
 function derivePasswordHash_(password, salt, iterations) {

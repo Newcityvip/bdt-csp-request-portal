@@ -1,8 +1,3 @@
-const BACKEND_URL =
-  "https://script.google.com/macros/s/AKfycbyanyavF31y_Z-q0PIjZkYJJCVZPmWXQgtJiuJh2KboaeHi4PSQwFpNqw8c7Lqn91vn/exec";
-const ALLOWED_TTL_SECONDS = 45;
-const DENIED_TTL_SECONDS = 15;
-
 const BLOCKED_PAGE = `<!doctype html>
 <html lang="en">
 <head>
@@ -11,8 +6,8 @@ const BLOCKED_PAGE = `<!doctype html>
   <title>Access Restricted | Ops Request Hub</title>
   <style>
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; background: #f4f7fb; color: #172033; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-    main { width: min(480px, 100%); padding: 40px; background: #fff; border: 1px solid #e3e8ef; border-radius: 16px; box-shadow: 0 14px 40px rgba(16, 35, 61, 0.09); text-align: center; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; background: #f3f6fb; color: #172033; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { width: min(480px, 100%); padding: 44px 40px; background: #fff; border: 1px solid #dfe6ef; border-radius: 18px; box-shadow: 0 18px 50px rgba(16, 35, 61, 0.1); text-align: center; }
     .mark { display: grid; place-items: center; width: 48px; height: 48px; margin: 0 auto 20px; border-radius: 12px; background: #0b1b32; color: #fff; font-weight: 800; }
     .brand { margin: 0 0 24px; color: #526174; font-size: 14px; font-weight: 700; }
     h1 { margin: 0 0 14px; font-size: 28px; }
@@ -47,45 +42,13 @@ function blockedResponse() {
 }
 
 export async function onRequest(context) {
-  const visitorIp = context.request.headers.get("CF-Connecting-IP");
+  const visitorIp = context.request.headers.get("CF-Connecting-IP")?.trim().toLowerCase();
+  const allowedIps = new Set(
+    String(context.env.ALLOWED_IPS || "")
+      .split(",")
+      .map((ip) => ip.trim().toLowerCase())
+      .filter(Boolean),
+  );
 
-  if (!visitorIp) {
-    return blockedResponse();
-  }
-
-  try {
-    const cache = caches.default;
-    const cacheKey = new Request(`https://ip-authorization.internal/${encodeURIComponent(visitorIp)}`);
-    const cached = await cache.match(cacheKey);
-
-    if (cached) {
-      return (await cached.text()) === "allowed" ? context.next() : blockedResponse();
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const url = `${BACKEND_URL}?action=checkIp&ip=${encodeURIComponent(visitorIp)}`;
-    let response;
-
-    try {
-      response = await fetch(url, { cache: "no-store", signal: controller.signal });
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    if (!response.ok) {
-      return blockedResponse();
-    }
-
-    const data = await response.json();
-
-    const allowed = data?.ok === true && data?.allowed === true;
-    const ttl = allowed ? ALLOWED_TTL_SECONDS : DENIED_TTL_SECONDS;
-    await cache.put(cacheKey, new Response(allowed ? "allowed" : "denied", {
-      headers: { "Cache-Control": `public, max-age=${ttl}` },
-    }));
-    return allowed ? context.next() : blockedResponse();
-  } catch {
-    return blockedResponse();
-  }
+  return visitorIp && allowedIps.has(visitorIp) ? context.next() : blockedResponse();
 }

@@ -27,7 +27,7 @@
         </div>
         <div class="field">
           <label for="login-password">Password</label>
-          <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+          <div class="password-control"><input id="login-password" name="password" type="password" autocomplete="current-password" required><button type="button" class="password-toggle" data-password-toggle="login-password" aria-label="Show password">Show</button></div>
         </div>
         <p class="login-error" id="login-error" role="alert" hidden></p>
         <button class="primary-button login-button" id="login-button" type="submit">Sign In</button>
@@ -123,7 +123,7 @@
               <select id="user-status-filter" aria-label="Filter users by status"><option value="">All statuses</option><option>Active</option><option>Inactive</option></select>
             </div>
             <div class="result-summary" id="user-result-summary">Loading users…</div>
-            <div class="table-wrap"><table><thead><tr><th>User ID</th><th>Name</th><th>Username</th><th>Team</th><th>Role</th><th>Status</th><th>Last Login</th><th>Updated</th><th>Action</th></tr></thead><tbody id="users-table"></tbody></table><div class="empty-state" id="users-empty" hidden><span>♙</span><h3>No users found</h3><p>Try changing or clearing your filters.</p></div></div>
+            <div class="table-wrap"><table><thead><tr><th>User ID</th><th>Name</th><th>Username</th><th>Team</th><th>Role</th><th>Status</th><th>Password</th><th>Last Login</th><th>Updated</th><th>Action</th></tr></thead><tbody id="users-table"></tbody></table><div class="empty-state" id="users-empty" hidden><span>♙</span><h3>No users found</h3><p>Try changing or clearing your filters.</p></div></div>
           </div>
         </section>
       </main>
