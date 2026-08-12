@@ -1,5 +1,7 @@
 const BACKEND_URL =
   "https://script.google.com/macros/s/AKfycbyanyavF31y_Z-q0PIjZkYJJCVZPmWXQgtJiuJh2KboaeHi4PSQwFpNqw8c7Lqn91vn/exec";
+const ALLOWED_TTL_SECONDS = 45;
+const DENIED_TTL_SECONDS = 15;
 
 const BLOCKED_PAGE = `<!doctype html>
 <html lang="en">
@@ -51,15 +53,25 @@ export async function onRequest(context) {
     return blockedResponse();
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-
   try {
+    const cache = caches.default;
+    const cacheKey = new Request(`https://ip-authorization.internal/${encodeURIComponent(visitorIp)}`);
+    const cached = await cache.match(cacheKey);
+
+    if (cached) {
+      return (await cached.text()) === "allowed" ? context.next() : blockedResponse();
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
     const url = `${BACKEND_URL}?action=checkIp&ip=${encodeURIComponent(visitorIp)}`;
-    const response = await fetch(url, {
-      cache: "no-store",
-      signal: controller.signal,
-    });
+    let response;
+
+    try {
+      response = await fetch(url, { cache: "no-store", signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!response.ok) {
       return blockedResponse();
@@ -67,14 +79,13 @@ export async function onRequest(context) {
 
     const data = await response.json();
 
-    if (data?.ok === true && data?.allowed === true) {
-      return context.next();
-    }
+    const allowed = data?.ok === true && data?.allowed === true;
+    const ttl = allowed ? ALLOWED_TTL_SECONDS : DENIED_TTL_SECONDS;
+    await cache.put(cacheKey, new Response(allowed ? "allowed" : "denied", {
+      headers: { "Cache-Control": `public, max-age=${ttl}` },
+    }));
+    return allowed ? context.next() : blockedResponse();
   } catch {
     return blockedResponse();
-  } finally {
-    clearTimeout(timeout);
   }
-
-  return blockedResponse();
 }

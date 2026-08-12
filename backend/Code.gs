@@ -34,8 +34,9 @@ const ROLES = {
 
 const SESSION_SECONDS = 8 * 60 * 60;
 const SESSION_CACHE_SECONDS = 6 * 60 * 60;
-const PASSWORD_VERSION = "v1";
-const PASSWORD_ITERATIONS = 10000;
+const PASSWORD_VERSION = "v2";
+const PASSWORD_ITERATIONS = 1500;
+const LEGACY_PASSWORD_VERSION = "v1";
 const MAX_LIMIT = 500;
 const ACTIVE_REQUEST_STATUSES = ["Pending", "Processing"];
 
@@ -177,6 +178,10 @@ function login_(input) {
   }
 
   const now = new Date();
+  if (passwordHashNeedsUpgrade_(user.Password_Hash)) {
+    writeCell_(table.sheet, user._row, table.index.Password_Hash, hashPassword_(password));
+    writeCell_(table.sheet, user._row, table.index.Updated_At, now);
+  }
   writeCell_(table.sheet, user._row, table.index.Last_Login, now);
   const session = {
     userId: cleanString_(user.User_ID, 100),
@@ -693,11 +698,16 @@ function hashPassword_(password) {
 
 function verifyPassword_(password, stored) {
   const parts = cleanString_(stored, 1000).split("$");
-  if (parts.length !== 4 || parts[0] !== PASSWORD_VERSION) return false;
+  if (parts.length !== 4 || [LEGACY_PASSWORD_VERSION, PASSWORD_VERSION].indexOf(parts[0]) === -1) return false;
   const iterations = Number(parts[1]);
   if (!Number.isInteger(iterations) || iterations < 1000 || iterations > 100000) return false;
   const calculated = derivePasswordHash_(password, parts[2], iterations);
   return constantTimeEqual_(calculated, parts[3]);
+}
+
+function passwordHashNeedsUpgrade_(stored) {
+  const parts = cleanString_(stored, 1000).split("$");
+  return parts.length === 4 && parts[0] === LEGACY_PASSWORD_VERSION;
 }
 
 function derivePasswordHash_(password, salt, iterations) {
