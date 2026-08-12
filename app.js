@@ -1,7 +1,7 @@
 const catalogState = { brands: [], requestTypes: [], loaded: false, loading: false };
 const requestState = { dashboard: null, my: [], team: [], queue: [], queueCache: {}, reports: [], detailCache: {}, queueStatus: "Active", loading: {}, loaded: {}, sequence: {}, inFlight: {}, mutating: {}, duplicatePayload: null, submittedTicket: null, activeDetailId: null, refreshTimer: null, lastAutoRefresh: 0, filterTimers: {} };
 const API_URL = "/api";
-const API_TIMEOUT_MS = 15000;
+const API_TIMEOUT_MS = 28000;
 const TOKEN_STORAGE_KEY = "opsRequestHubSession";
 const DATA_CACHE_KEY = "opsRequestHubData";
 const ROLE_ACCESS = {
@@ -45,7 +45,7 @@ async function apiPost(action, payload = {}, options = {}) {
       signal: controller.signal
     });
   } catch (error) {
-    if (error?.name === "AbortError") throw new ApiError(options.timeoutMessage || "The service is taking too long. Please try again.", "TIMEOUT");
+    if (error?.name === "AbortError") throw new ApiError(options.timeoutMessage || "The service is taking too long. Please try again.", "UPSTREAM_TIMEOUT");
     throw new ApiError("Unable to reach the service. Please try again.", "NETWORK_ERROR");
   } finally {
     clearTimeout(timeout);
@@ -57,7 +57,7 @@ async function apiPost(action, payload = {}, options = {}) {
 
   if (!result || result.ok !== true) {
     const code = result?.code || "REQUEST_ERROR";
-    if (!options.skipExpiry && ["UNAUTHORIZED", "SESSION_EXPIRED"].includes(code)) handleSessionExpiry();
+    if (!options.skipExpiry && ["UNAUTHORIZED", "SESSION_EXPIRED", "AUTH_EXPIRED"].includes(code)) handleSessionExpiry();
     throw new ApiError(typeof result?.error === "string" ? result.error : "The request could not be completed.", code, result?.data);
   }
   return result.data;
@@ -71,7 +71,7 @@ function authenticatedPost(action, payload = {}) {
   if (!authState.token) return Promise.reject(new ApiError("Authentication is required.", "UNAUTHORIZED"));
   return apiPost(action, { token: authState.token, ...payload });
 }
-function authenticatedRead(action,payload={}){const key=cacheKey(action,payload);if(requestState.inFlight[key])return requestState.inFlight[key];const promise=authenticatedPost(action,payload).finally(()=>delete requestState.inFlight[key]);requestState.inFlight[key]=promise;return promise}
+function authenticatedRead(action,payload={}){const key=cacheKey(action,payload);if(requestState.inFlight[key])return requestState.inFlight[key];const promise=(async()=>{try{return await authenticatedPost(action,payload)}catch(error){if(!["TIMEOUT","UPSTREAM_TIMEOUT","UPSTREAM_UNAVAILABLE","NETWORK_ERROR"].includes(error.code))throw error;return authenticatedPost(action,payload)}})().finally(()=>delete requestState.inFlight[key]);requestState.inFlight[key]=promise;return promise}
 
 function allowedViews() { return ROLE_ACCESS[authState.user?.role]?.views || []; }
 function defaultView() { return ROLE_ACCESS[authState.user?.role]?.defaultView || "dashboard"; }
@@ -132,6 +132,7 @@ function navigate(view) {
   if(view==="dashboard"&&requestState.dashboard)renderDashboard(requestState.dashboard);
   if(view==="my-requests"&&requestState.loaded.my)renderRequestList("my");
   if(view==="team-requests"&&requestState.loaded.team)renderRequestList("team");
+  if(view==="csp-queue")setQueueStatus(requestState.queueStatus);
   if(view==="csp-queue"){const cached=requestState.queueCache[queueCacheKey()];if(cached){requestState.queue=cached;requestState.loaded.queue=true;renderQueueRows()}}
   if (view === "user-management") loadUsers();
   if (view === "dashboard") loadDashboard();
@@ -160,7 +161,7 @@ async function loadRequestList(kind,{silent=false}={}){if(requestState.loading[k
 function renderQueueRows(){const rows=requestState.queue,pending=rows.filter(r=>r.status==="Pending").length,processing=rows.filter(r=>r.status==="Processing").length;$("#queue-count").textContent=pending;if(requestState.dashboard?.metrics)$("#queue-stats").innerHTML=statCards({...requestState.dashboard.metrics,pending,processing});$("#queue-table").innerHTML=rows.map(r=>{const details=requestDetailsText(r.raw),canFinish=r.status==="Processing"&&(authState.user.role!=="CSP_STAFF"||r.takenById===authState.user.userId),handler=r.status==="Processing"?`<strong>Processing by ${escapeHtml(r.takenByName||"Unknown")}</strong>`:"—";return `<tr><td><strong>${ageFrom(r.requestedAt)}</strong></td><td><button class="ticket-button" data-ticket="${escapeHtml(r.requestId)}">${escapeHtml(r.requestId)}</button></td><td><strong>${escapeHtml(r.brand)}</strong></td><td>${escapeHtml(r.requestType)}</td><td><strong>${escapeHtml(details[0]||"—")}</strong><span class="sub-detail">${escapeHtml(details.slice(1).join(" / ")||"—")}</span></td><td>${escapeHtml(r.requestedByName||"—")}</td><td>${statusBadge(r.status)}</td><td>${handler}</td><td><div class="action-group"><button class="action-button" data-ticket="${escapeHtml(r.requestId)}">View</button>${r.status==="Pending"?`<button class="action-button primary" data-take="${escapeHtml(r.requestId)}">Take Request</button>`:canFinish?`<button class="action-button success" data-complete="${escapeHtml(r.requestId)}">Complete</button><button class="action-button danger" data-unable="${escapeHtml(r.requestId)}">Unable</button>`:""}</div></td></tr>`}).join("");$("#queue-empty").hidden=rows.length>0;$(".live-indicator").innerHTML='<i></i> Last updated '+new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}
 function setQueueStatus(status){requestState.queueStatus=status;$$('[data-queue-status]').forEach(button=>button.classList.toggle("active",button.dataset.queueStatus===status))}
 function queueCacheKey(){return cacheKey(requestState.queueStatus,{search:$("#queue-search")?.value||""})}
-async function loadQueue({silent=false}={}){if(requestState.loading.queue||requestState.mutating.queue)return;const key=queueCacheKey(),cached=requestState.queueCache[key];if(cached){requestState.queue=cached;requestState.loaded.queue=true;renderQueueRows()}requestState.loading.queue=true;const initial=!cached&&!requestState.loaded.queue,sequence=(requestState.sequence.queue||0)+1,params={status:requestState.queueStatus,search:$("#queue-search")?.value||"",limit:200};requestState.sequence.queue=sequence;if(initial)setTableLoading("#queue-table",9);try{const data=await authenticatedRead("cspQueue",params);if(sequence!==requestState.sequence.queue)return;requestState.queue=(data.requests||[]).map(normalizeRequest);requestState.queueCache[key]=requestState.queue;requestState.loaded.queue=true;renderQueueRows();saveSessionCache()}catch(e){if(e.code!=="UNAUTHORIZED"&&!silent)showToast(e.message);if(initial){$("#queue-table").innerHTML='<tr class="table-loading"><td colspan="9">Unable to load the CSP queue. <button class="text-button" data-retry-queue>Retry</button></td></tr>';}}finally{requestState.loading.queue=false}}
+async function loadQueue({silent=false}={}){if(requestState.loading.queue||requestState.mutating.queue)return;const key=queueCacheKey(),cached=requestState.queueCache[key];if(cached){requestState.queue=cached;requestState.loaded.queue=true;renderQueueRows();$(".live-indicator").innerHTML="<i></i> Refreshing…"}requestState.loading.queue=true;const initial=!cached&&!requestState.loaded.queue,sequence=(requestState.sequence.queue||0)+1,params={status:requestState.queueStatus,search:$("#queue-search")?.value||"",limit:200};requestState.sequence.queue=sequence;if(initial)setTableLoading("#queue-table",9);try{const data=await authenticatedRead("cspQueue",params);if(sequence!==requestState.sequence.queue)return;requestState.queue=(data.requests||[]).map(normalizeRequest);requestState.queueCache[key]=requestState.queue;requestState.loaded.queue=true;renderQueueRows();saveSessionCache()}catch(e){if(e.code!=="UNAUTHORIZED"&&!silent)showToast(e.message);if(initial)$("#queue-table").innerHTML='<tr class="table-loading"><td colspan="9">Unable to load the CSP queue. <button class="text-button" data-retry-queue>Retry</button></td></tr>';else $(".live-indicator").innerHTML='<span class="refresh-error">Refresh failed</span> <button class="text-button" data-retry-queue>Retry</button>'}finally{requestState.loading.queue=false}}
 function populateCatalogs(){const brandCodes=catalogState.brands.map(x=>x.code);["brand","my-brand","team-brand","report-brand"].forEach(id=>replaceOptions($(`#${id}`),brandCodes,id==="brand"?"Select brand":"All brands"));const typeNames=catalogState.requestTypes.map(x=>x.requestType);["request-type","my-type","team-type","report-type"].forEach(id=>{const el=$(`#${id}`);if(el)replaceOptions(el,typeNames,id==="request-type"?"Select request type":"All request types")})}
 async function loadCatalogs(){if(catalogState.loaded){populateCatalogs();return}if(catalogState.loading)return;catalogState.loading=true;try{const [brands,types]=await Promise.all([authenticatedRead("brands"),authenticatedRead("requestTypes")]);catalogState.brands=brands||[];catalogState.requestTypes=types||[];catalogState.loaded=true;populateCatalogs();saveSessionCache()}catch(e){showToast(e.message)}finally{catalogState.loading=false}}
 function replaceOptions(select,values,first){if(!select)return;select.innerHTML=`<option value="">${first}</option>`;fillSelect(select,values)}
@@ -366,6 +367,7 @@ async function submitLogin(event) {
   error.hidden = true;
   if (!username || !password) { error.textContent = "Enter your username and password."; error.hidden = false; return; }
   const button = $("#login-button");
+  if (button.disabled) return;
   button.disabled = true;
   button.textContent = "Signing In…";
   try {

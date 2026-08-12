@@ -1,4 +1,4 @@
-const UPSTREAM_TIMEOUT_MS = 14000;
+const UPSTREAM_TIMEOUT_MS = 25000;
 
 function jsonResponse(body, status) {
   return new Response(JSON.stringify(body), {
@@ -13,14 +13,14 @@ function jsonResponse(body, status) {
 
 export async function onRequestPost(context) {
   const upstreamUrl = String(context.env.APPS_SCRIPT_URL || "").trim();
-  if (!upstreamUrl) return jsonResponse({ ok: false, code: "SERVICE_UNAVAILABLE", error: "The service is not configured." }, 502);
+  if (!upstreamUrl) return jsonResponse({ ok: false, code: "UPSTREAM_UNAVAILABLE", error: "The service is not configured." }, 502);
 
   let body;
   try {
     body = await context.request.text();
     JSON.parse(body);
   } catch {
-    return jsonResponse({ ok: false, code: "INVALID_REQUEST", error: "The request body must be valid JSON." }, 400);
+    return jsonResponse({ ok: false, code: "VALIDATION_ERROR", error: "The request body must be valid JSON." }, 400);
   }
 
   const controller = new AbortController();
@@ -34,7 +34,7 @@ export async function onRequestPost(context) {
       redirect: "follow",
       signal: controller.signal,
     });
-    if (!response.ok) return jsonResponse({ ok: false, code: "UPSTREAM_ERROR", error: "The service is temporarily unavailable." }, 502);
+    if (!response.ok) return jsonResponse({ ok: false, code: "UPSTREAM_UNAVAILABLE", error: "The service is temporarily unavailable." }, 502);
     const text = await response.text();
     try {
       JSON.parse(text);
@@ -44,7 +44,7 @@ export async function onRequestPost(context) {
     }
   } catch (error) {
     const timedOut = error?.name === "AbortError";
-    return jsonResponse({ ok: false, code: timedOut ? "UPSTREAM_TIMEOUT" : "UPSTREAM_ERROR", error: timedOut ? "The service took too long to respond." : "The service is temporarily unavailable." }, timedOut ? 504 : 502);
+    return jsonResponse({ ok: false, code: timedOut ? "UPSTREAM_TIMEOUT" : "UPSTREAM_UNAVAILABLE", error: timedOut ? "The service took too long to respond." : "The service is temporarily unavailable." }, timedOut ? 504 : 502);
   } finally {
     clearTimeout(timeout);
   }

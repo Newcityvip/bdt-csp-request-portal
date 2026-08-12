@@ -181,22 +181,24 @@ function login_(input) {
   const password = typeof input.password === "string" ? input.password : "";
   if (!username || !password) throw new ApiError_("Username and password are required.", "INVALID_CREDENTIALS");
 
-  const table = getTable_(SHEETS.USERS);
-  const user = table.rows.find(function (row) {
-    return cleanString_(row.Username, 100).toLowerCase() === username;
-  });
+  const found = findObjectRow_(SHEETS.USERS, "Username", username, false);
+  const table = found.table;
+  const user = found.row;
 
   if (!user || cleanString_(user.Status, 30).toLowerCase() !== "active" || !verifyPassword_(password, user.Password_Hash)) {
     throw new ApiError_("Invalid username or password.", "INVALID_CREDENTIALS");
   }
 
   const now = new Date();
-  const loginUpdates = { Last_Login: now };
+  const loginUpdates = {};
   if (passwordHashNeedsUpgrade_(user.Password_Hash)) {
     loginUpdates.Password_Hash = hashPassword_(password);
     loginUpdates.Updated_At = now;
+    loginUpdates.Last_Login = now;
+    updateObjectRow_(table, user._row, loginUpdates);
+  } else if (!user.Last_Login || now.getTime() - dateMs_(user.Last_Login) >= 15 * 60 * 1000) {
+    writeCell_(table.sheet, user._row, table.index.Last_Login, now);
   }
-  updateObjectRow_(table, user._row, loginUpdates);
   const session = {
     userId: cleanString_(user.User_ID, 100),
     name: cleanString_(user.Name, 150),
@@ -402,8 +404,7 @@ function requestDetails_(input) {
   const session = requireSession_(input.token);
   const request = findRequest_(requireRequestId_(input.requestId));
   authorizeRequestView_(session, request);
-  const history = readRows_(SHEETS.HISTORY)
-    .filter(function (row) { return cleanString_(row.Request_ID, 100) === request.Request_ID; })
+  const history = findObjectRows_(SHEETS.HISTORY, "Request_ID", request.Request_ID, true)
     .sort(function (a, b) { return dateMs_(a.Created_At) - dateMs_(b.Created_At); })
     .map(function (row) {
       return selectFields_(row, ["History_ID", "Request_ID", "Action", "Old_Status", "New_Status", "Performed_By_ID", "Performed_By_Name", "Performed_By_Team", "Details", "Created_At"]);
@@ -680,20 +681,20 @@ function requireSession_(tokenValue) {
   const cache = CacheService.getScriptCache();
   const properties = PropertiesService.getScriptProperties();
   const serialized = cache.get(key) || properties.getProperty(key);
-  if (!serialized) throw new ApiError_("Your session is invalid or has expired.", "UNAUTHORIZED");
+  if (!serialized) throw new ApiError_("Your session is invalid or has expired.", "AUTH_EXPIRED");
 
   let session;
-  try { session = JSON.parse(serialized); } catch (error) { deleteSession_(token); throw new ApiError_("Your session is invalid or has expired.", "UNAUTHORIZED"); }
+  try { session = JSON.parse(serialized); } catch (error) { deleteSession_(token); throw new ApiError_("Your session is invalid or has expired.", "AUTH_EXPIRED"); }
   if (!session || Number(session.expiry) <= Date.now()) {
     deleteSession_(token);
-    throw new ApiError_("Your session is invalid or has expired.", "UNAUTHORIZED");
+    throw new ApiError_("Your session is invalid or has expired.", "AUTH_EXPIRED");
   }
 
   validateKnownRole_(session.role);
-  const user = readRows_(SHEETS.USERS).find(function (row) { return cleanString_(row.User_ID, 100) === session.userId; });
+  const user = findObjectRow_(SHEETS.USERS, "User_ID", session.userId, true).row;
   if (!user || cleanString_(user.Status, 30).toLowerCase() !== "active" || cleanString_(user.Role, 50) !== session.role) {
     deleteSession_(token);
-    throw new ApiError_("Your session is invalid or has expired.", "UNAUTHORIZED");
+    throw new ApiError_("Your session is invalid or has expired.", "AUTH_EXPIRED");
   }
 
   cache.put(key, serialized, Math.min(SESSION_CACHE_SECONDS, Math.max(1, Math.floor((session.expiry - Date.now()) / 1000))));
@@ -768,7 +769,7 @@ function validateNewPassword_(password) {
 }
 
 function getTable_(sheetName) {
-  if (requestTables_[sheetName]) return requestTables_[sheetName];
+  if (requestTables_[sheetName] && requestTables_[sheetName].complete) return requestTables_[sheetName];
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
   if (!sheet) throw new ApiError_("Required data is unavailable.", "DATA_CONFIGURATION_ERROR");
   const expected = HEADERS[sheetName];
@@ -786,7 +787,7 @@ function getTable_(sheetName) {
     actual.forEach(function (header, position) { if (header) object[header] = row[position]; });
     return object;
   }).filter(function (row) { return expected.some(function (header) { return row[header] !== ""; }); });
-  const table = { sheet: sheet, headers: actual, index: index, rows: rows };
+  const table = { sheet: sheet, headers: actual, index: index, rows: rows, complete: true };
   requestTables_[sheetName] = table;
   return table;
 }
@@ -841,17 +842,47 @@ function getWriteTable_(sheetName) {
   const index = {};
   headers.forEach(function(header, position){if(header) index[header]=position+1;});
   expected.forEach(function(header){if(!index[header]) throw new ApiError_("Required data is unavailable.", "DATA_CONFIGURATION_ERROR");});
-  const table = { sheet: sheet, headers: headers, index: index, rows: [] };
+  const table = { sheet: sheet, headers: headers, index: index, rows: [], complete: false };
   requestTables_[sheetName] = table;
   return table;
+}
+
+function objectFromSheetRow_(table, rowNumber) {
+  const values = table.sheet.getRange(rowNumber, 1, 1, table.headers.length).getValues()[0];
+  const object = { _row: rowNumber };
+  table.headers.forEach(function (header, position) { if (header) object[header] = values[position]; });
+  return object;
+}
+
+function findObjectRow_(sheetName, header, value, matchCase) {
+  const table = getWriteTable_(sheetName);
+  table.complete = false;
+  const lastRow = table.sheet.getLastRow();
+  if (lastRow < 2 || !table.index[header]) return { table: table, row: null };
+  const match = table.sheet.getRange(2, table.index[header], lastRow - 1, 1)
+    .createTextFinder(String(value)).matchEntireCell(true).matchCase(matchCase === true).findNext();
+  const row = match ? objectFromSheetRow_(table, match.getRow()) : null;
+  table.rows = row ? [row] : [];
+  return { table: table, row: row };
+}
+
+function findObjectRows_(sheetName, header, value, matchCase) {
+  const table = getWriteTable_(sheetName);
+  table.complete = false;
+  const lastRow = table.sheet.getLastRow();
+  if (lastRow < 2 || !table.index[header]) return [];
+  return table.sheet.getRange(2, table.index[header], lastRow - 1, 1)
+    .createTextFinder(String(value)).matchEntireCell(true).matchCase(matchCase === true).findAll()
+    .map(function (match) { return objectFromSheetRow_(table, match.getRow()); });
 }
 
 function withRequestLock_(requestId, callback) {
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    const table = getTable_(SHEETS.REQUESTS);
-    const request = table.rows.find(function (row) { return cleanString_(row.Request_ID, 100) === requestId; });
+    const found = findObjectRow_(SHEETS.REQUESTS, "Request_ID", requestId, true);
+    const table = found.table;
+    const request = found.row;
     if (!request) throw new ApiError_("Request not found.", "NOT_FOUND");
     return callback(table, request);
   } finally {
@@ -860,7 +891,7 @@ function withRequestLock_(requestId, callback) {
 }
 
 function findRequest_(requestId) {
-  const request = readRows_(SHEETS.REQUESTS).find(function (row) { return cleanString_(row.Request_ID, 100) === requestId; });
+  const request = findObjectRow_(SHEETS.REQUESTS, "Request_ID", requestId, true).row;
   if (!request) throw new ApiError_("Request not found.", "NOT_FOUND");
   return request;
 }
