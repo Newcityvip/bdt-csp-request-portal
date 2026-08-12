@@ -40,6 +40,9 @@ const PASSWORD_ITERATIONS = 500;
 const SUPPORTED_PASSWORD_VERSIONS = ["v1", "v2", "v3"];
 const MAX_LIMIT = 500;
 const ACTIVE_REQUEST_STATUSES = ["Pending", "Processing"];
+const STATIC_CACHE_SECONDS = 180;
+let requestTables_ = {};
+let requestStatic_ = {};
 
 const REQUEST_INPUTS = {
   brand: "Brand",
@@ -80,6 +83,8 @@ function doPost(e) {
 
 function handleApi_(e, method) {
   try {
+    requestTables_ = {};
+    requestStatic_ = {};
     const input = method === "POST" ? parsePostBody_(e) : copyObject_((e && e.parameter) || {});
     const action = cleanString_(input.action, 50);
 
@@ -114,6 +119,7 @@ function handleApi_(e, method) {
       updateUser: function () { return success_(updateUser_(input)); },
       resetUserPassword: function () { return success_(resetUserPassword_(input)); },
       setUserStatus: function () { return success_(setUserStatus_(input)); },
+      reports: function () { return success_(reports_(input)); },
     };
 
     if (!actions[action]) throw new ApiError_("Unknown action.", "UNKNOWN_ACTION");
@@ -140,16 +146,21 @@ function checkIp_(ip) {
 }
 
 function brands_() {
+  const cached = staticCacheGet_("BRANDS_V1");
+  if (cached) return success_(cached);
   const data = readRows_(SHEETS.BRANDS)
     .filter(function (row) { return isTrue_(row.Active); })
     .sort(sortByNumber_("Sort_Order"))
     .map(function (row) {
       return { brandId: cleanString_(row.Brand_ID, 100), code: cleanString_(row.Brand_Code, 50), name: cleanString_(row.Brand_Name, 150) };
     });
+  staticCachePut_("BRANDS_V1", data);
   return success_(data);
 }
 
 function requestTypes_() {
+  const cached = staticCacheGet_("REQUEST_TYPES_V1");
+  if (cached) return success_(cached);
   const data = readRows_(SHEETS.TYPES)
     .filter(function (row) { return isTrue_(row.Active); })
     .sort(sortByNumber_("Sort_Order"))
@@ -161,6 +172,7 @@ function requestTypes_() {
         optionalFields: parseFieldList_(row.Optional_Fields),
       };
     });
+  staticCachePut_("REQUEST_TYPES_V1", data);
   return success_(data);
 }
 
@@ -179,11 +191,12 @@ function login_(input) {
   }
 
   const now = new Date();
+  const loginUpdates = { Last_Login: now };
   if (passwordHashNeedsUpgrade_(user.Password_Hash)) {
-    writeCell_(table.sheet, user._row, table.index.Password_Hash, hashPassword_(password));
-    writeCell_(table.sheet, user._row, table.index.Updated_At, now);
+    loginUpdates.Password_Hash = hashPassword_(password);
+    loginUpdates.Updated_At = now;
   }
-  writeCell_(table.sheet, user._row, table.index.Last_Login, now);
+  updateObjectRow_(table, user._row, loginUpdates);
   const session = {
     userId: cleanString_(user.User_ID, 100),
     name: cleanString_(user.Name, 150),
@@ -235,8 +248,9 @@ function createRequest_(input) {
   });
   if (missing.length) throw new ApiError_("Required request information is missing: " + missing.join(", ") + ".", "VALIDATION_ERROR");
 
+  const requestsTable = getTable_(SHEETS.REQUESTS);
   if (duplicateCheckEnabled_()) {
-    const similar = findSimilarRequests_(values);
+    const similar = findSimilarRequests_(values, requestsTable.rows);
     if (similar.length && input.confirmDuplicate !== true) {
       return { created: false, duplicateWarning: true, similarRequests: similar };
     }
@@ -247,10 +261,11 @@ function createRequest_(input) {
   try {
     // Recheck under the lock so a concurrent matching submission is visible.
     if (duplicateCheckEnabled_() && input.confirmDuplicate !== true) {
-      const concurrentSimilar = findSimilarRequests_(values);
+      requestTables_[SHEETS.REQUESTS] = null;
+      const table = getTable_(SHEETS.REQUESTS);
+      const concurrentSimilar = findSimilarRequests_(values, table.rows);
       if (concurrentSimilar.length) return { created: false, duplicateWarning: true, similarRequests: concurrentSimilar };
-    }
-
+    } else requestTables_[SHEETS.REQUESTS] = null;
     const table = getTable_(SHEETS.REQUESTS);
     const now = new Date();
     values.Request_ID = nextRequestId_(table.rows);
@@ -285,11 +300,27 @@ function teamRequests_(input) {
 
 function cspQueue_(input) {
   requireRole_(input.token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]);
-  const queue = readRows_(SHEETS.REQUESTS)
-    .filter(function (row) { return ACTIVE_REQUEST_STATUSES.indexOf(cleanString_(row.Status, 30)) !== -1; })
+  const status = cleanString_(input.status || "Active", 30);
+  const queue = filterRequestRows_(readRows_(SHEETS.REQUESTS), mergeObjects_(input, { status: "" }))
+    .filter(function (row) { return status === "All" || (status === "Active" ? ACTIVE_REQUEST_STATUSES.indexOf(cleanString_(row.Status, 30)) !== -1 : row.Status === status); })
     .sort(function (a, b) { return dateMs_(a.Requested_At) - dateMs_(b.Requested_At); })
     .map(projectQueueRequest_);
   return { requests: queue, count: queue.length };
+}
+
+function reports_(input) {
+  requireRole_(input.token, [ROLES.CSP_ADMIN, ROLES.SUPER]);
+  const from = cleanString_(input.fromDate, 20), to = cleanString_(input.toDate, 20);
+  const requestedBy = cleanString_(input.requestedBy, 150).toLowerCase();
+  const handledBy = cleanString_(input.handledBy, 150).toLowerCase();
+  const rows = filterRequestRows_(readRows_(SHEETS.REQUESTS), mergeObjects_(input, { limit: MAX_LIMIT })).filter(function (row) {
+    const key = dateKey_(row.Requested_At);
+    return (!from || key >= from) && (!to || key <= to) && (!requestedBy || cleanString_(row.Requested_By_Name,150).toLowerCase().indexOf(requestedBy) !== -1) && (!handledBy || cleanString_(row.Taken_By_Name,150).toLowerCase().indexOf(handledBy) !== -1);
+  });
+  const completed = rows.filter(function(r){return r.Status === "Completed";}).length;
+  const unable = rows.filter(function(r){return r.Status === "Unable";}).length;
+  function average(field){const values=rows.filter(function(r){return r[field] !== "" && r[field] !== null && r[field] !== undefined;}).map(function(r){return Number(r[field]);}).filter(function(v){return Number.isFinite(v)&&v>=0;});return values.length?Math.round(values.reduce(function(a,b){return a+b;},0)/values.length):"";}
+  return { requests: rows.map(projectRequest_), metrics: { total: rows.length, completed: completed, unable: unable, pending: rows.filter(function(r){return r.Status==="Pending";}).length, averageWaiting: average("Waiting_Seconds"), averageHandling: average("Handling_Seconds"), averageTotal: average("Total_Seconds") } };
 }
 
 function takeRequest_(input) {
@@ -737,6 +768,7 @@ function validateNewPassword_(password) {
 }
 
 function getTable_(sheetName) {
+  if (requestTables_[sheetName]) return requestTables_[sheetName];
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
   if (!sheet) throw new ApiError_("Required data is unavailable.", "DATA_CONFIGURATION_ERROR");
   const expected = HEADERS[sheetName];
@@ -754,7 +786,9 @@ function getTable_(sheetName) {
     actual.forEach(function (header, position) { if (header) object[header] = row[position]; });
     return object;
   }).filter(function (row) { return expected.some(function (header) { return row[header] !== ""; }); });
-  return { sheet: sheet, headers: actual, index: index, rows: rows };
+  const table = { sheet: sheet, headers: actual, index: index, rows: rows };
+  requestTables_[sheetName] = table;
+  return table;
 }
 
 function readRows_(sheetName) {
@@ -763,14 +797,16 @@ function readRows_(sheetName) {
 
 function appendObjectRow_(table, object) {
   const row = table.headers.map(function (header) { return Object.prototype.hasOwnProperty.call(object, header) ? object[header] : ""; });
-  table.sheet.appendRow(row);
+  table.sheet.getRange(table.sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
 }
 
 function updateObjectRow_(table, rowNumber, updates) {
+  const current = table.rows.find(function(row){return row._row === rowNumber;});
+  const values = table.headers.map(function(header){return Object.prototype.hasOwnProperty.call(updates,header)?updates[header]:(current&&Object.prototype.hasOwnProperty.call(current,header)?current[header]:"");});
   Object.keys(updates).forEach(function (header) {
     if (!table.index[header]) throw new ApiError_("Required data is unavailable.", "DATA_CONFIGURATION_ERROR");
-    writeCell_(table.sheet, rowNumber, table.index[header], updates[header]);
   });
+  table.sheet.getRange(rowNumber, 1, 1, values.length).setValues([values]);
 }
 
 function writeCell_(sheet, row, column, value) {
@@ -779,7 +815,7 @@ function writeCell_(sheet, row, column, value) {
 }
 
 function appendHistory_(requestId, action, oldStatus, newStatus, session, details) {
-  const table = getTable_(SHEETS.HISTORY);
+  const table = getWriteTable_(SHEETS.HISTORY);
   const now = new Date();
   appendObjectRow_(table, {
     History_ID: "HIS-" + now.getTime() + "-" + Utilities.getUuid().replace(/-/g, "").slice(0, 10),
@@ -793,6 +829,21 @@ function appendHistory_(requestId, action, oldStatus, newStatus, session, detail
     Details: cleanString_(details, 1000),
     Created_At: now,
   });
+}
+
+function getWriteTable_(sheetName) {
+  const cached = requestTables_[sheetName];
+  if (cached) return cached;
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  const expected = HEADERS[sheetName];
+  if (!sheet || !expected) throw new ApiError_("Required data is unavailable.", "DATA_CONFIGURATION_ERROR");
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const index = {};
+  headers.forEach(function(header, position){if(header) index[header]=position+1;});
+  expected.forEach(function(header){if(!index[header]) throw new ApiError_("Required data is unavailable.", "DATA_CONFIGURATION_ERROR");});
+  const table = { sheet: sheet, headers: headers, index: index, rows: [] };
+  requestTables_[sheetName] = table;
+  return table;
 }
 
 function withRequestLock_(requestId, callback) {
@@ -836,11 +887,11 @@ function duplicateCheckEnabled_() {
   return value === undefined ? true : isTrue_(value);
 }
 
-function findSimilarRequests_(values) {
+function findSimilarRequests_(values, rows) {
   const identifiers = ["Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Transaction_ID"]
     .filter(function (field) { return cleanString_(values[field], fieldLimit_(field)); });
   if (!identifiers.length) return [];
-  return readRows_(SHEETS.REQUESTS).filter(function (row) {
+  return (rows || readRows_(SHEETS.REQUESTS)).filter(function (row) {
     if (ACTIVE_REQUEST_STATUSES.indexOf(cleanString_(row.Status, 30)) === -1) return false;
     if (cleanString_(row.Brand, 50) !== values.Brand || cleanString_(row.Request_Type, 150) !== values.Request_Type) return false;
     return identifiers.some(function (field) {
@@ -852,6 +903,10 @@ function findSimilarRequests_(values) {
 }
 
 function filterRequests_(rows, input) {
+  return filterRequestRows_(rows, input).map(projectListRequest_);
+}
+
+function filterRequestRows_(rows, input) {
   const status = cleanString_(input.status, 30);
   const brand = cleanString_(input.brand, 50);
   const requestType = cleanString_(input.requestType, 150);
@@ -863,7 +918,7 @@ function filterRequests_(rows, input) {
     if (requestType && row.Request_Type !== requestType) return false;
     if (search && !searchFields.some(function (field) { return cleanString_(row[field], 500).toLowerCase().indexOf(search) !== -1; })) return false;
     return true;
-  }).sort(newestFirst_).slice(0, parseLimit_(input.limit)).map(projectListRequest_);
+  }).sort(newestFirst_).slice(0, parseLimit_(input.limit));
 }
 
 function listResponse_(requests) {
@@ -905,12 +960,27 @@ function emptyRequest_() {
 }
 
 function getConfig_() {
+  const cached = staticCacheGet_("CONFIG_V1");
+  if (cached) return cached;
   const config = {};
   readRows_(SHEETS.CONFIG).forEach(function (row) {
     const key = cleanString_(row.Config_Key, 100);
     if (key) config[key] = row.Config_Value;
   });
+  staticCachePut_("CONFIG_V1", config);
   return config;
+}
+
+function staticCacheGet_(key) {
+  if (Object.prototype.hasOwnProperty.call(requestStatic_, key)) return requestStatic_[key];
+  const value = CacheService.getScriptCache().get(key);
+  if (!value) return null;
+  try { requestStatic_[key] = JSON.parse(value); return requestStatic_[key]; } catch (error) { return null; }
+}
+
+function staticCachePut_(key, value) {
+  requestStatic_[key] = value;
+  CacheService.getScriptCache().put(key, JSON.stringify(value), STATIC_CACHE_SECONDS);
 }
 
 function canonicalRequestField_(name) {
