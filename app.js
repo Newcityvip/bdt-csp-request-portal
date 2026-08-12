@@ -1,4 +1,5 @@
-const BRANDS = ["M1", "M2", "B1", "B2", "B3", "B4", "B5", "K1", "TK", "JW"];
+const catalogState = { brands: [], requestTypes: [] };
+const requestState = { dashboard: null, my: [], team: [], queue: [], loading: {}, duplicatePayload: null, refreshTimer: null, lastAutoRefresh: 0, filterTimers: {} };
 const API_URL = "https://script.google.com/macros/s/AKfycbyanyavF31y_Z-q0PIjZkYJJCVZPmWXQgtJiuJh2KboaeHi4PSQwFpNqw8c7Lqn91vn/exec";
 const TOKEN_STORAGE_KEY = "opsRequestHubSession";
 const ROLE_ACCESS = {
@@ -11,38 +12,19 @@ const authState = { user: null, token: null };
 const adminState = { users: [], loaded: false };
 
 class ApiError extends Error {
-  constructor(message, code = "REQUEST_ERROR") { super(message); this.name = "ApiError"; this.code = code; }
+  constructor(message, code = "REQUEST_ERROR", data = null) { super(message); this.name = "ApiError"; this.code = code; this.data = data; }
 }
-const REQUEST_FIELDS = {
-  "Phone Number Deletion": [{name:"player",label:"Player Username",required:true},{name:"phone",label:"Phone Number",type:"tel",required:true},{name:"notes",label:"Notes",type:"textarea"}],
-  "Phone Number Verify": [{name:"player",label:"Player Username",required:true},{name:"phone",label:"Phone Number",type:"tel",required:true},{name:"notes",label:"Notes",type:"textarea"}],
-  "Email Verify": [{name:"player",label:"Player Username",required:true},{name:"email",label:"Email",type:"email",required:true},{name:"notes",label:"Notes",type:"textarea"}],
-  "Add KYC Bonus": [{name:"player",label:"Player Username",required:true},{name:"notes",label:"Notes",type:"textarea"}],
-  "Cancel Turnover": [{name:"player",label:"Player Username",required:true},{name:"transaction",label:"Transaction / Deposit ID",required:true},{name:"amount",label:"Amount",type:"number"},{name:"notes",label:"Reason / Notes",type:"textarea",required:true}],
-  "Reset Password": [{name:"player",label:"Player Username",required:true},{name:"notes",label:"Notes",type:"textarea"}],
-  "Account Unlock": [{name:"player",label:"Player Username",required:true},{name:"notes",label:"Notes",type:"textarea"}],
-  "Add Phone Number": [{name:"player",label:"Player Username",required:true},{name:"phone",label:"New Phone Number",type:"tel",required:true},{name:"notes",label:"Notes",type:"textarea"}],
-  "Change Email": [{name:"player",label:"Player Username",required:true},{name:"currentEmail",label:"Current Email",type:"email"},{name:"email",label:"New Email",type:"email",required:true},{name:"notes",label:"Notes",type:"textarea"}],
-  "Change Full Name": [{name:"player",label:"Player Username",required:true},{name:"currentName",label:"Current Name"},{name:"newName",label:"New Full Name",required:true},{name:"notes",label:"Reason / Notes",type:"textarea",required:true}],
-  "Change Linked Player": [{name:"affiliate",label:"Affiliate Username",required:true},{name:"currentPlayer",label:"Current Player Username",required:true},{name:"newPlayer",label:"New Player Username",required:true},{name:"notes",label:"Reason / Notes",type:"textarea",required:true}]
+const FIELD_META = {
+  Player_Username:["playerUsername","Player Username","text"], Affiliate_Username:["affiliateUsername","Affiliate Username","text"],
+  Phone_Number:["phoneNumber","Phone Number","tel"], Email:["email","Email","email"], Current_Email:["currentEmail","Current Email","email"],
+  New_Email:["newEmail","New Email","email"], Current_Name:["currentName","Current Name","text"], New_Full_Name:["newFullName","New Full Name","text"],
+  Current_Player_Username:["currentPlayerUsername","Current Player Username","text"], New_Player_Username:["newPlayerUsername","New Player Username","text"],
+  Transaction_ID:["transactionId","Transaction / Deposit ID","text"], Amount:["amount","Amount","number"], Notes:["notes","Notes","textarea"]
 };
-
-const requests = [
-  {ticket:"REQ-001842",brand:"B4",type:"Phone Number Verify",player:"user123",phone:"01795021979",status:"Pending",submitted:"Today, 2:14 PM",age:"12m",handler:"—",requestedBy:"Nabil"},
-  {ticket:"REQ-001841",brand:"M2",type:"Phone Number Deletion",player:"player555",phone:"01844215671",status:"Processing",submitted:"Today, 1:58 PM",age:"28m",handler:"Kim",requestedBy:"Nabil"},
-  {ticket:"REQ-001840",brand:"B1",type:"Email Verify",player:"raihan77",email:"raihan77@example.com",status:"Pending",submitted:"Today, 1:42 PM",age:"44m",handler:"—",requestedBy:"Farhan"},
-  {ticket:"REQ-001839",brand:"TK",type:"Cancel Turnover",player:"emon22",transaction:"DEP-883291",amount:"৳5,000",status:"Unable",reason:"Incorrect information",submitted:"Today, 12:51 PM",age:"1h 35m",handler:"Anna",requestedBy:"Nabil"},
-  {ticket:"REQ-001838",brand:"K1",type:"Account Unlock",player:"user888",status:"Completed",submitted:"Today, 12:36 PM",age:"1h 50m",handler:"Kim",requestedBy:"Nabil"},
-  {ticket:"REQ-001837",brand:"M1",type:"Reset Password",player:"samir89",status:"Completed",submitted:"Today, 11:20 AM",age:"3h 6m",handler:"Anna",requestedBy:"Tasnim"},
-  {ticket:"REQ-001836",brand:"B5",type:"Change Email",player:"rifat03",email:"newmail@example.com",status:"Pending",submitted:"Today, 10:45 AM",age:"3h 41m",handler:"—",requestedBy:"Nabil"},
-  {ticket:"REQ-001835",brand:"JW",type:"Add KYC Bonus",player:"maria91",status:"Completed",submitted:"Yesterday, 5:22 PM",age:"21h",handler:"Kim",requestedBy:"Sadia"}
-];
 
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
-const statusBadge = status => `<span class="badge ${status.toLowerCase()}">${status}</span>`;
-const detailText = r => [r.player || r.affiliate, r.phone || r.email || r.transaction || r.newPlayer].filter(Boolean).join(" / ");
-const findRequest = ticket => requests.find(r => r.ticket === ticket);
+const statusBadge = status => `<span class="badge ${String(status).toLowerCase()}">${escapeHtml(status)}</span>`;
 
 function fillSelect(select, values) { values.forEach(value => select.insertAdjacentHTML("beforeend", `<option value="${value}">${value}</option>`)); }
 function showToast(message) { const toast=$("#toast"); toast.textContent=message; toast.classList.add("show"); clearTimeout(showToast.timer); showToast.timer=setTimeout(()=>toast.classList.remove("show"),3200); }
@@ -57,7 +39,7 @@ async function apiPost(action, payload = {}, options = {}) {
       body: JSON.stringify({ action, ...payload })
     });
   } catch {
-    throw new ApiError("Unable to connect. Please check your connection and try again.", "NETWORK_ERROR");
+    throw new ApiError("Unable to reach the service. Please try again.", "NETWORK_ERROR");
   }
 
   let result;
@@ -67,7 +49,7 @@ async function apiPost(action, payload = {}, options = {}) {
   if (!result || result.ok !== true) {
     const code = result?.code || "REQUEST_ERROR";
     if (!options.skipExpiry && ["UNAUTHORIZED", "SESSION_EXPIRED"].includes(code)) handleSessionExpiry();
-    throw new ApiError(typeof result?.error === "string" ? result.error : "The request could not be completed.", code);
+    throw new ApiError(typeof result?.error === "string" ? result.error : "The request could not be completed.", code, result?.data);
   }
   return result.data;
 }
@@ -78,14 +60,14 @@ async function apiGet(action, params = {}, options = {}) {
   Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== null) url.searchParams.set(key, value); });
   let response;
   try { response = await fetch(url.toString(), { cache: "no-store" }); }
-  catch { throw new ApiError("Unable to connect. Please check your connection and try again.", "NETWORK_ERROR"); }
+  catch { throw new ApiError("Unable to reach the service. Please try again.", "NETWORK_ERROR"); }
   let result;
   try { result = await response.json(); }
   catch { throw new ApiError("The service returned an invalid response. Please try again.", "INVALID_RESPONSE"); }
   if (!result || result.ok !== true) {
     const code = result?.code || "REQUEST_ERROR";
     if (!options.skipExpiry && ["UNAUTHORIZED", "SESSION_EXPIRED"].includes(code)) handleSessionExpiry();
-    throw new ApiError(typeof result?.error === "string" ? result.error : "The request could not be completed.", code);
+    throw new ApiError(typeof result?.error === "string" ? result.error : "The request could not be completed.", code, result?.data);
   }
   return result.data;
 }
@@ -97,7 +79,7 @@ function authenticatedPost(action, payload = {}) {
 
 function allowedViews() { return ROLE_ACCESS[authState.user?.role]?.views || []; }
 function defaultView() { return ROLE_ACCESS[authState.user?.role]?.defaultView || "dashboard"; }
-function clearAuth() { localStorage.removeItem(TOKEN_STORAGE_KEY); authState.token = null; authState.user = null; adminState.users = []; adminState.loaded = false; }
+function clearAuth() { localStorage.removeItem(TOKEN_STORAGE_KEY); authState.token = null; authState.user = null; adminState.users = []; adminState.loaded = false; clearInterval(requestState.refreshTimer); Object.values(requestState.filterTimers).forEach(clearTimeout); requestState.refreshTimer=null; requestState.filterTimers={}; }
 function showLogin(message = "") {
   $("#app-shell").hidden = true;
   $("#auth-shell").hidden = false;
@@ -121,6 +103,8 @@ function showPortal(user, token) {
   updateAuthenticatedUi();
   $("#auth-shell").hidden = true;
   $("#app-shell").hidden = false;
+  loadCatalogs();
+  startAutoRefresh();
   const requested = location.hash.slice(1);
   navigate(permissions.views.includes(requested) ? requested : permissions.defaultView);
 }
@@ -146,48 +130,37 @@ function navigate(view) {
   const active=$(`#${view}-view`); $("#page-title").textContent=active?.dataset.title || "Ops Request Hub";
   history.replaceState(null,"",`#${view}`); closeSidebar(); window.scrollTo(0,0);
   if (view === "user-management") loadUsers();
+  if (view === "dashboard") loadDashboard();
+  if (view === "my-requests") loadRequestList("my");
+  if (view === "team-requests") loadRequestList("team");
+  if (view === "csp-queue") { loadQueue(); loadDashboard(); }
 }
 function openSidebar(){ $("#sidebar").classList.add("open"); $("#sidebar-overlay").classList.add("show"); $("#menu-button").setAttribute("aria-expanded","true"); }
 function closeSidebar(){ $("#sidebar").classList.remove("open"); $("#sidebar-overlay").classList.remove("show"); $("#menu-button").setAttribute("aria-expanded","false"); }
 
-function renderStats() {
-  const data=[{label:"Pending",value:requests.filter(r=>r.status==="Pending").length,icon:"…"},{label:"Processing",value:requests.filter(r=>r.status==="Processing").length,icon:"↻"},{label:"Completed Today",value:requests.filter(r=>r.status==="Completed"&&r.submitted.startsWith("Today")).length,icon:"✓",className:"completed"},{label:"Unable",value:requests.filter(r=>r.status==="Unable").length,icon:"!"}];
-  $("#dashboard-stats").innerHTML=data.map(s=>`<article class="stat-card"><div class="stat-icon ${s.className||s.label.toLowerCase().split(" ")[0]}">${s.icon}</div><div><strong>${s.value}</strong><span>${s.label}</span></div></article>`).join("");
-  const q=[{label:"Pending",value:requests.filter(r=>r.status==="Pending").length,icon:"…"},{label:"Processing",value:requests.filter(r=>r.status==="Processing").length,icon:"↻"},{label:"Completed Today",value:requests.filter(r=>r.status==="Completed"&&r.submitted.startsWith("Today")).length,icon:"✓",className:"completed"},{label:"Unable Today",value:requests.filter(r=>r.status==="Unable"&&r.submitted.startsWith("Today")).length,icon:"!",className:"unable"}];
-  $("#queue-stats").innerHTML=q.map(s=>`<article class="stat-card"><div class="stat-icon ${s.className||s.label.toLowerCase()}">${s.icon}</div><div><strong>${s.value}</strong><span>${s.label}</span></div></article>`).join("");
-  $("#queue-count").textContent=requests.filter(r=>r.status==="Pending").length;
-}
-function rowMarkup(r, team=false) { return `<tr><td><button class="ticket-button" data-ticket="${r.ticket}">${r.ticket}</button></td><td><strong>${r.brand}</strong></td><td>${r.type}</td><td><strong>${detailText(r).split(" / ")[0]}</strong><span class="sub-detail">${detailText(r).split(" / ").slice(1).join(" / ")||"—"}</span></td>${team?`<td>${r.requestedBy}</td>`:""}<td>${statusBadge(r.status)}</td><td>${r.submitted}</td>${team?"":`<td>${r.handler}</td>`}<td><button class="action-button" data-ticket="${r.ticket}">View</button></td></tr>`; }
-function renderTables() {
-  $("#recent-requests").innerHTML=requests.slice(0,5).map(r=>rowMarkup(r)).join("");
-  renderFiltered("my"); renderFiltered("team"); renderQueue(); renderStats();
-}
-function matches(r, search, status, brand, type="") { const haystack=[r.ticket,r.player,r.phone,r.email,r.type,r.requestedBy].filter(Boolean).join(" ").toLowerCase(); return (!search||haystack.includes(search.toLowerCase()))&&(!status||r.status===status)&&(!brand||r.brand===brand)&&(!type||r.type===type); }
-function renderFiltered(kind) {
-  const mine=kind==="my"; const data=requests.filter(r=>(!mine||r.requestedBy==="Nabil")&&matches(r,$(`#${kind}-search`).value,$(`#${kind}-status`).value,$(`#${kind}-brand`).value,mine?$("#my-type").value:""));
-  $(`#${kind}-requests-table`).innerHTML=data.map(r=>rowMarkup(r,!mine)).join(""); $(`#${kind}-result-summary`).textContent=`Showing ${data.length} request${data.length===1?"":"s"}`; $(`#${kind}-empty`).hidden=data.length>0;
-}
-function renderQueue() {
-  const active=requests.filter(r=>["Pending","Processing"].includes(r.status));
-  $("#queue-table").innerHTML=active.map(r=>`<tr><td><strong>${r.age}</strong></td><td><button class="ticket-button" data-ticket="${r.ticket}">${r.ticket}</button></td><td><strong>${r.brand}</strong></td><td>${r.type}</td><td><strong>${detailText(r).split(" / ")[0]}</strong><span class="sub-detail">${detailText(r).split(" / ").slice(1).join(" / ")||"—"}</span></td><td>${r.requestedBy}</td><td>${statusBadge(r.status)}</td><td>${r.status==="Processing"?`<strong>Kim</strong><span class="sub-detail">Processing now</span>`:"—"}</td><td>${r.status==="Pending"?`<button class="action-button primary" data-take="${r.ticket}">Take Request</button>`:`<div class="action-group"><button class="action-button success" data-complete="${r.ticket}">Complete</button><button class="action-button danger" data-unable="${r.ticket}">Unable</button></div>`}</td></tr>`).join("");
-  $("#queue-empty").hidden=active.length>0;
-}
-
-function renderDynamicFields(type) {
-  const container=$("#dynamic-fields"); if(!type){container.innerHTML='<div class="form-placeholder"><span>↖</span><p>Select a request type to see the required details.</p></div>';return;}
-  const fields=REQUEST_FIELDS[type]; container.innerHTML=`<div class="form-section-title"><span>2</span><div><h3>Request details</h3><p>Provide accurate information for ${type.toLowerCase()}.</p></div></div><div class="form-grid two">${fields.map(field=>`<div class="field ${field.type==="textarea"?"full-width":""}"><label for="field-${field.name}">${field.label}${field.required?' <em>*</em>':''}</label>${field.type==="textarea"?`<textarea id="field-${field.name}" name="${field.name}" rows="3" ${field.required?"required":""} placeholder="Enter ${field.label.toLowerCase()}"></textarea>`:`<input id="field-${field.name}" name="${field.name}" type="${field.type||"text"}" ${field.required?"required":""} placeholder="Enter ${field.label.toLowerCase()}">`}<small class="error-text">This field is required.</small></div>`).join("")}</div>`;
-  $$(".full-width",container).forEach(el=>el.style.gridColumn="1 / -1");
-}
-function submitRequest(event) { event.preventDefault(); const form=event.currentTarget; $$(".field",form).forEach(f=>f.classList.remove("invalid")); if(!form.checkValidity()){ $$('[required]',form).filter(el=>!el.validity.valid).forEach(el=>el.closest(".field").classList.add("invalid")); form.querySelector(":invalid")?.focus(); return; } showToast("Request form is ready. Backend connection will be added next."); form.reset(); renderDynamicFields(""); }
-
-function openDetails(ticket) {
-  const r=findRequest(ticket); if(!r)return; const values=[...[{label:"Brand",value:r.brand},{label:"Player Username",value:r.player,copy:true},{label:"Phone Number",value:r.phone,copy:true},{label:"Email",value:r.email,copy:true},{label:"Transaction ID",value:r.transaction,copy:true},{label:"Amount",value:r.amount},{label:"Requested by",value:r.requestedBy},{label:"Submitted",value:r.submitted},{label:"Handler",value:r.handler}], ...(r.reason?[{label:"Unable reason",value:r.reason}]:[])].filter(x=>x.value&&x.value!=="—");
-  $("#details-content").innerHTML=`<div class="details-head"><span class="badge ${r.status.toLowerCase()}">${r.status}</span><h2 id="details-title">${r.ticket}</h2><p>${r.type}</p></div><div class="details-body"><div class="detail-grid">${values.map(v=>`<div class="detail-item"><label>${v.label}</label><div class="detail-value"><span>${v.value}</span>${v.copy?`<button class="copy-button" data-copy="${v.value}">Copy</button>`:""}</div></div>`).join("")}</div><div class="details-status"><span>This request uses sample data and is not persisted.</span>${statusBadge(r.status)}</div></div>`; openModal("details-modal");
-}
+const getField = (row, name) => row?.[name] ?? "";
+function formatDate(value) { if (!value) return "—"; const date=new Date(value); return Number.isNaN(date.getTime())?"—":new Intl.DateTimeFormat(undefined,{dateStyle:"medium",timeStyle:"short"}).format(date); }
+function formatDuration(seconds) { const total=Number(seconds); if(!Number.isFinite(total))return "—"; if(total<60)return `${Math.max(0,Math.floor(total))}s`; if(total<3600)return `${Math.floor(total/60)}m`; return `${Math.floor(total/3600)}h ${Math.floor((total%3600)/60)}m`; }
+function ageFrom(value){const ms=Date.now()-new Date(value).getTime();return Number.isFinite(ms)?formatDuration(Math.max(0,ms/1000)):"—"}
+function requestDetailsText(r){return [getField(r,"Player_Username"),getField(r,"Affiliate_Username"),getField(r,"Phone_Number"),getField(r,"Email"),getField(r,"Transaction_ID")].filter(Boolean)}
+function statCards(metrics){const items=[["Pending",metrics?.pending||0,"…","pending"],["Processing",metrics?.processing||0,"↻","processing"],["Completed Today",metrics?.completedToday||0,"✓","completed"],["Unable Today",metrics?.unableToday||0,"!","unable"]];return items.map(i=>`<article class="stat-card"><div class="stat-icon ${i[3]}">${i[2]}</div><div><strong>${i[1]}</strong><span>${i[0]}</span></div></article>`).join("")}
+function liveRow(r,team=false,my=false){const details=requestDetailsText(r);const id=getField(r,"Request_ID");return `<tr><td><button class="ticket-button" data-ticket="${escapeHtml(id)}">${escapeHtml(id)}</button></td><td><strong>${escapeHtml(getField(r,"Brand"))}</strong></td><td>${escapeHtml(getField(r,"Request_Type"))}</td><td><strong>${escapeHtml(details[0]||"—")}</strong><span class="sub-detail">${escapeHtml(details.slice(1).join(" / ")||"—")}</span></td>${team?`<td>${escapeHtml(getField(r,"Requested_By_Name")||"—")}</td>`:""}<td>${statusBadge(getField(r,"Status"))}</td><td>${escapeHtml(formatDate(getField(r,"Requested_At")))}</td><td>${escapeHtml(getField(r,"Taken_By_Name")||"—")}</td><td><div class="action-group"><button class="action-button" data-ticket="${escapeHtml(id)}">View</button>${my&&getField(r,"Status")==="Pending"?`<button class="action-button danger" data-cancel="${escapeHtml(id)}">Cancel</button>`:""}</div></td></tr>`}
+function setTableLoading(id,cols){$(id).innerHTML=`<tr class="table-loading"><td colspan="${cols}">Loading requests…</td></tr>`}
+async function loadDashboard(){if(requestState.loading.dashboard)return;requestState.loading.dashboard=true;try{const data=await authenticatedPost("dashboard");requestState.dashboard=data;$("#dashboard-stats").innerHTML=statCards(data.metrics);$("#queue-stats").innerHTML=statCards(data.metrics);const recent=data.recentRequests||[];$("#recent-requests").innerHTML=recent.map(r=>liveRow(r)).join("")||'<tr class="table-loading"><td colspan="8">No recent requests.</td></tr>';}catch(e){if(e.code!=="UNAUTHORIZED")showToast(e.message)}finally{requestState.loading.dashboard=false}}
+function requestFilters(kind){return {search:$(`#${kind}-search`).value,status:$(`#${kind}-status`).value,brand:$(`#${kind}-brand`).value,requestType:$(`#${kind}-type`)?.value||"",limit:100}}
+async function loadRequestList(kind){if(requestState.loading[kind])return;requestState.loading[kind]=true;const team=kind==="team";setTableLoading(`#${kind}-requests-table`,team?9:8);try{const data=await authenticatedPost(team?"teamRequests":"myRequests",requestFilters(kind));requestState[kind]=data.requests||[];$( `#${kind}-requests-table`).innerHTML=requestState[kind].map(r=>liveRow(r,team,!team)).join("");$(`#${kind}-result-summary`).textContent=`Showing ${requestState[kind].length} request${requestState[kind].length===1?"":"s"}`;$(`#${kind}-empty`).hidden=requestState[kind].length>0;}catch(e){if(e.code!=="UNAUTHORIZED")showToast(e.message)}finally{requestState.loading[kind]=false}}
+async function loadQueue(){if(requestState.loading.queue)return;requestState.loading.queue=true;setTableLoading("#queue-table",9);try{const data=await authenticatedPost("cspQueue");requestState.queue=data.requests||[];$("#queue-count").textContent=requestState.queue.filter(r=>r.Status==="Pending").length;$("#queue-table").innerHTML=requestState.queue.map(r=>{const id=r.Request_ID,details=requestDetailsText(r);const canFinish=r.Status==="Processing"&&(authState.user.role!=="CSP_STAFF"||r.Taken_By_ID===authState.user.userId);return `<tr><td><strong>${ageFrom(r.Requested_At)}</strong></td><td><button class="ticket-button" data-ticket="${escapeHtml(id)}">${escapeHtml(id)}</button></td><td><strong>${escapeHtml(r.Brand)}</strong></td><td>${escapeHtml(r.Request_Type)}</td><td><strong>${escapeHtml(details[0]||"—")}</strong><span class="sub-detail">${escapeHtml(details.slice(1).join(" / ")||"—")}</span></td><td>${escapeHtml(r.Requested_By_Name||"—")}</td><td>${statusBadge(r.Status)}</td><td>${escapeHtml(r.Taken_By_Name||"—")}</td><td>${r.Status==="Pending"?`<button class="action-button primary" data-take="${escapeHtml(id)}">Take Request</button>`:canFinish?`<div class="action-group"><button class="action-button success" data-complete="${escapeHtml(id)}">Complete</button><button class="action-button danger" data-unable="${escapeHtml(id)}">Unable</button></div>`:"—"}</td></tr>`}).join("");$("#queue-empty").hidden=requestState.queue.length>0;}catch(e){if(e.code!=="UNAUTHORIZED")showToast(e.message)}finally{requestState.loading.queue=false}}
+async function loadCatalogs(){try{const [brands,types]=await Promise.all([apiGet("brands"),apiGet("requestTypes")]);catalogState.brands=brands||[];catalogState.requestTypes=types||[];const brandCodes=catalogState.brands.map(x=>x.code);["brand","my-brand","team-brand"].forEach(id=>replaceOptions($(`#${id}`),brandCodes,id==="brand"?"Select brand":"All brands"));const typeNames=catalogState.requestTypes.map(x=>x.requestType);["request-type","my-type","team-type"].forEach(id=>{const el=$(`#${id}`);if(el)replaceOptions(el,typeNames,id==="request-type"?"Select request type":"All request types")});}catch(e){showToast(e.message)}}
+function replaceOptions(select,values,first){if(!select)return;select.innerHTML=`<option value="">${first}</option>`;fillSelect(select,values)}
+function renderDynamicFields(type){const container=$("#dynamic-fields"),definition=catalogState.requestTypes.find(x=>x.requestType===type);if(!definition){container.innerHTML='<div class="form-placeholder"><span>↖</span><p>Select a request type to see the required details.</p></div>';return}const required=definition.requiredFields||[],fields=[...required,...(definition.optionalFields||[]).filter(x=>!required.includes(x))].filter(x=>FIELD_META[x]);container.innerHTML=`<div class="form-section-title"><span>2</span><div><h3>Request details</h3><p>Provide accurate information for ${escapeHtml(type.toLowerCase())}.</p></div></div><div class="form-grid two">${fields.map(name=>{const [key,label,inputType]=FIELD_META[name],req=required.includes(name);return `<div class="field ${inputType==="textarea"?"full-width":""}"><label for="field-${key}">${label}${req?' <em>*</em>':''}</label>${inputType==="textarea"?`<textarea id="field-${key}" name="${key}" rows="3" ${req?"required":""}></textarea>`:`<input id="field-${key}" name="${key}" type="${inputType}" ${req?"required":""}>`}<small class="error-text">This field is required.</small></div>`}).join("")}</div>`;}
+function requestPayloadFromForm(){const data=new FormData($("#request-form")),payload={brand:data.get("brand"),requestType:data.get("requestType")};for(const meta of Object.values(FIELD_META)){const value=data.get(meta[0]);if(value!==null&&String(value).trim())payload[meta[0]]=String(value).trim()}return payload}
+async function submitRequest(event){event.preventDefault();const form=event.currentTarget;if(!form.checkValidity()){form.reportValidity();return}await createLiveRequest(requestPayloadFromForm(),false,form)}
+async function createLiveRequest(payload,confirmDuplicate,form=$("#request-form")){setFormBusy(form,true,"Submitting…");try{const data=await authenticatedPost("createRequest",{...payload,confirmDuplicate});if(data.duplicateWarning&&!confirmDuplicate){requestState.duplicatePayload=payload;renderDuplicates(data.similarRequests||[]);openModal("duplicate-modal");return}const ticket=data.ticket||data.request?.Request_ID;form.reset();renderDynamicFields("");showToast(`Request ${ticket} submitted successfully.`);navigate("my-requests");await Promise.all([loadRequestList("my"),loadDashboard()]);}catch(e){showToast(e.message)}finally{setFormBusy(form,false)}}
+function renderDuplicates(items){$("#duplicate-list").innerHTML=items.map(r=>`<div class="duplicate-item"><strong>${escapeHtml(r.requestId)}</strong><span>${escapeHtml(r.brand)} · ${escapeHtml(r.requestType)} · ${escapeHtml(r.status)}</span><small>${escapeHtml(r.requestedBy||"—")} · ${escapeHtml(formatDate(r.requestedAt))}</small></div>`).join("")}
+async function openDetails(ticket){$("#details-content").innerHTML='<div class="details-body table-loading">Loading request details…</div>';openModal("details-modal");try{const data=await authenticatedPost("requestDetails",{requestId:ticket}),r=data.request||{};const fields=["Brand","Player_Username","Affiliate_Username","Phone_Number","Email","Current_Email","New_Email","Current_Name","New_Full_Name","Current_Player_Username","New_Player_Username","Transaction_ID","Amount","Notes","Requested_By_Name","Requested_At","Taken_By_Name","Taken_At","Completed_By_Name","Completed_At","Unable_Reason","Waiting_Seconds","Handling_Seconds","Total_Seconds"].filter(k=>r[k]!==""&&r[k]!=null);const timing=["Waiting_Seconds","Handling_Seconds","Total_Seconds"];$("#details-content").innerHTML=`<div class="details-head">${statusBadge(r.Status)}<h2 id="details-title">${escapeHtml(r.Request_ID)}</h2><p>${escapeHtml(r.Request_Type)}</p></div><div class="details-body"><div class="detail-grid">${fields.map(k=>{const label=(FIELD_META[k]?.[1]||k.replaceAll("_"," ")),value=timing.includes(k)?formatDuration(r[k]):k.endsWith("_At")?formatDate(r[k]):r[k],copy=FIELD_META[k]&&!timing.includes(k);return `<div class="detail-item"><label>${escapeHtml(label)}</label><div class="detail-value"><span>${escapeHtml(value)}</span>${copy?`<button class="copy-button" data-copy="${escapeHtml(value)}">Copy</button>`:""}</div></div>`}).join("")}</div><div class="history-timeline"><h3>Request History</h3>${(data.history||[]).map(h=>`<div class="history-entry"><i></i><div><strong>${escapeHtml(h.Action)}</strong><span>${escapeHtml(h.Performed_By_Name||"System")} · ${escapeHtml(formatDate(h.Created_At))}</span>${h.Details?`<p>${escapeHtml(h.Details)}</p>`:""}</div></div>`).join("")||"<p>No history available.</p>"}</div></div>`;}catch(e){closeModals();showToast(e.message)}}
 function openModal(id){const modal=$(`#${id}`);modal.hidden=false;document.body.style.overflow="hidden";setTimeout(()=>$(".modal-close",modal).focus(),0)}
 function closeModals(){ $$(".modal-backdrop").forEach(m=>m.hidden=true); clearSensitiveFields(); document.body.style.overflow=""; }
 async function copyValue(value){try{await navigator.clipboard.writeText(value);showToast("Copied to clipboard.")}catch{showToast("Clipboard access is unavailable in this browser.")}}
-function updateRequest(ticket,status,reason=""){const r=findRequest(ticket);if(!r)return;r.status=status;r.handler=status==="Processing"?"Kim":r.handler;if(reason)r.reason=reason;renderTables();showToast(status==="Processing"?`${ticket} is now processing by Kim.`:`${ticket} marked ${status.toLowerCase()}.`)}
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
@@ -395,16 +368,25 @@ async function logout() {
   finally { clearAuth(); closeSidebar(); closeModals(); history.replaceState(null, "", location.pathname + location.search); showLogin(); }
 }
 
+async function mutateRequest(action, requestId, payload, successMessage, button) {
+  if (button) { button.disabled=true; button.dataset.oldText=button.textContent; button.textContent="Working…"; }
+  try { await authenticatedPost(action,{requestId,...payload}); closeModals(); showToast(successMessage); await Promise.all([loadDashboard(),allowedViews().includes("csp-queue")?loadQueue():Promise.resolve(),allowedViews().includes("my-requests")?loadRequestList("my"):Promise.resolve(),allowedViews().includes("team-requests")?loadRequestList("team"):Promise.resolve()]); }
+  catch(e){const handler=e.data?.handler?` Current handler: ${e.data.handler}.`:"";showToast(`${e.message}${handler}`);if(action==="takeRequest")loadQueue()}
+  finally { if(button){button.disabled=false;button.textContent=button.dataset.oldText||"Confirm"} }
+}
+function confirmRequestAction(title,copy,label,callback){$("#request-confirm-title").textContent=title;$("#request-confirm-copy").textContent=copy;const button=$("#request-confirm-button");button.textContent=label;button.onclick=()=>callback(button);openModal("request-confirm-modal")}
+function scheduleListLoad(kind){clearTimeout(requestState.filterTimers[kind]);requestState.filterTimers[kind]=setTimeout(()=>loadRequestList(kind),250)}
+function startAutoRefresh(){clearInterval(requestState.refreshTimer);requestState.lastAutoRefresh=Date.now();requestState.refreshTimer=setInterval(()=>{if(!authState.user||document.hidden)return;const view=location.hash.slice(1),threshold=view==="csp-queue"?12000:view==="dashboard"?30000:25000;if(Date.now()-requestState.lastAutoRefresh<threshold)return;requestState.lastAutoRefresh=Date.now();if(view==="csp-queue"){loadQueue();loadDashboard()}else if(view==="dashboard")loadDashboard();else if(view==="my-requests")loadRequestList("my");else if(view==="team-requests")loadRequestList("team")},5000)}
+
 function initialize() {
-  fillSelect($("#brand"),BRANDS); fillSelect($("#request-type"),Object.keys(REQUEST_FIELDS));
-  ["my-brand","team-brand"].forEach(id=>fillSelect($(`#${id}`),BRANDS)); ["my-status","team-status"].forEach(id=>fillSelect($(`#${id}`),["Pending","Processing","Completed","Unable"])); fillSelect($("#my-type"),Object.keys(REQUEST_FIELDS));
-  renderTables();
+  ["my-status","team-status"].forEach(id=>fillSelect($(`#${id}`),["Pending","Processing","Completed","Unable","Cancelled"]));
   $$(".nav-item").forEach(btn=>btn.addEventListener("click",()=>navigate(btn.dataset.view))); $$('[data-go]').forEach(btn=>btn.addEventListener("click",()=>navigate(btn.dataset.go)));
   $("#menu-button").addEventListener("click",openSidebar); $("#sidebar-overlay").addEventListener("click",closeSidebar); $("#request-type").addEventListener("change",e=>renderDynamicFields(e.target.value)); $("#request-form").addEventListener("submit",submitRequest);
-  ["my-search","my-status","my-brand","my-type"].forEach(id=>$(`#${id}`).addEventListener("input",()=>renderFiltered("my"))); ["team-search","team-status","team-brand"].forEach(id=>$(`#${id}`).addEventListener("input",()=>renderFiltered("team")));
+  ["my-search","my-status","my-brand","my-type"].forEach(id=>$(`#${id}`).addEventListener("input",()=>scheduleListLoad("my"))); ["team-search","team-status","team-brand","team-type"].forEach(id=>$(`#${id}`).addEventListener("input",()=>scheduleListLoad("team")));
   $("#unable-reason").addEventListener("change",e=>{$("#other-reason-field").hidden=e.target.value!=="Other";$("#other-reason").required=e.target.value==="Other"});
-  $("#unable-form").addEventListener("submit",e=>{e.preventDefault();if(!e.currentTarget.checkValidity()){e.currentTarget.reportValidity();return}const reason=$("#unable-reason").value==="Other"?$("#other-reason").value:$("#unable-reason").value;updateRequest($("#unable-ticket").value,"Unable",reason);closeModals();e.currentTarget.reset();$("#other-reason-field").hidden=true});
-  document.addEventListener("click",e=>{const ticket=e.target.closest("[data-ticket]")?.dataset.ticket;if(ticket)openDetails(ticket);const take=e.target.closest("[data-take]")?.dataset.take;if(take)updateRequest(take,"Processing");const complete=e.target.closest("[data-complete]")?.dataset.complete;if(complete)updateRequest(complete,"Completed");const unable=e.target.closest("[data-unable]")?.dataset.unable;if(unable){$("#unable-ticket").value=unable;openModal("unable-modal")}if(e.target.closest("[data-close-modal]")||e.target.classList.contains("modal-backdrop"))closeModals();const copy=e.target.closest("[data-copy]")?.dataset.copy;if(copy)copyValue(copy)});
+  $("#unable-form").addEventListener("submit",async e=>{e.preventDefault();if(!e.currentTarget.checkValidity()){e.currentTarget.reportValidity();return}const reason=$("#unable-reason").value==="Other"?$("#other-reason").value.trim():$("#unable-reason").value;await mutateRequest("unableRequest",$("#unable-ticket").value,{reason},`Request ${$("#unable-ticket").value} marked unable.`,$('button[type="submit"]',e.currentTarget));e.currentTarget.reset();$("#other-reason-field").hidden=true});
+  $("#submit-duplicate-button").addEventListener("click",async e=>{if(!requestState.duplicatePayload)return;const payload=requestState.duplicatePayload;requestState.duplicatePayload=null;closeModals();await createLiveRequest(payload,true,$("#request-form"))});
+  document.addEventListener("click",e=>{const ticket=e.target.closest("[data-ticket]")?.dataset.ticket;if(ticket)openDetails(ticket);const take=e.target.closest("[data-take]")?.dataset.take;if(take&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role))mutateRequest("takeRequest",take,{},`Request ${take} is now processing.`,e.target);const complete=e.target.closest("[data-complete]")?.dataset.complete;if(complete&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role))confirmRequestAction("Complete Request",`Mark ${complete} as completed?`,"Complete",button=>mutateRequest("completeRequest",complete,{},`Request ${complete} completed.`,button));const unable=e.target.closest("[data-unable]")?.dataset.unable;if(unable&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role)){$("#unable-ticket").value=unable;openModal("unable-modal")}const cancel=e.target.closest("[data-cancel]")?.dataset.cancel;if(cancel&&["BDT_STAFF","SUPER_ADMIN"].includes(authState.user.role))confirmRequestAction("Cancel Request",`Cancel pending request ${cancel}?`,"Cancel Request",button=>mutateRequest("cancelRequest",cancel,{},`Request ${cancel} cancelled.`,button));if(e.target.closest("[data-close-modal]")||e.target.classList.contains("modal-backdrop"))closeModals();const copy=e.target.closest("[data-copy]")?.dataset.copy;if(copy)copyValue(copy)});
   document.addEventListener("keydown",e=>{if(e.key==="Escape")closeModals()});
   window.addEventListener("hashchange", () => { if (authState.user) navigate(location.hash.slice(1)); });
   $("#login-form").addEventListener("submit", submitLogin);

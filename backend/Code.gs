@@ -834,7 +834,7 @@ function findSimilarRequests_(values) {
       return cleanString_(row[field], fieldLimit_(field)).toLowerCase() === cleanString_(values[field], fieldLimit_(field)).toLowerCase();
     });
   }).slice(0, 10).map(function (row) {
-    return { requestId: row.Request_ID, brand: row.Brand, requestType: row.Request_Type, status: row.Status, requestedAt: row.Requested_At };
+    return { requestId: row.Request_ID, brand: row.Brand, requestType: row.Request_Type, status: row.Status, requestedBy: row.Requested_By_Name, requestedAt: row.Requested_At };
   });
 }
 
@@ -876,7 +876,7 @@ function projectListRequest_(row) {
 }
 
 function projectQueueRequest_(row) {
-  return selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Requested_By_Name", "Requested_At", "Status", "Taken_By_Name", "Taken_At"]);
+  return selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Requested_By_Name", "Requested_At", "Status", "Taken_By_ID", "Taken_By_Name", "Taken_At"]);
 }
 
 function selectFields_(row, fields) {
