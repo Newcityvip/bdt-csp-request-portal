@@ -10,7 +10,7 @@ const ROLE_ACCESS = {
   CSP_ADMIN: { views: ["dashboard", "csp-queue", "reports"], defaultView: "csp-queue", label: "CSP Admin" },
   SUPER_ADMIN: { views: ["dashboard", "new-request", "my-requests", "team-requests", "csp-queue", "reports", "user-management"], defaultView: "dashboard", label: "Super Admin" }
 };
-const authState = { user: null, token: null };
+const authState = { user: null, token: null, loginPending: false };
 const adminState = { users: [], loaded: false, loading: false };
 
 class ApiError extends Error {
@@ -369,6 +369,7 @@ async function restoreSession() {
 
 async function submitLogin(event) {
   event.preventDefault();
+  if (authState.loginPending) return;
   const form = event.currentTarget;
   const username = $("#login-username").value.trim();
   const password = $("#login-password").value;
@@ -376,8 +377,8 @@ async function submitLogin(event) {
   error.hidden = true;
   if (!username || !password) { error.textContent = "Enter your username and password."; error.hidden = false; return; }
   const button = $("#login-button");
-  if (button.disabled) return;
   let failed = false;
+  authState.loginPending = true;
   button.disabled = true;
   button.textContent = "Signing In…";
   try {
@@ -388,11 +389,15 @@ async function submitLogin(event) {
     showPortal(data.user, data.token);
   } catch (apiError) {
     failed = true;
-    error.textContent = apiError.code === "INVALID_CREDENTIALS" ? "Invalid username or password." : apiError.message;
+    if (apiError.code === "INVALID_CREDENTIALS") error.textContent = "Invalid username or password.";
+    else if (["TIMEOUT", "UPSTREAM_TIMEOUT", "UPSTREAM_UNAVAILABLE", "NETWORK_ERROR"].includes(apiError.code)) error.textContent = "The authentication service is temporarily unavailable. Please try again.";
+    else if (["UNAUTHORIZED", "SESSION_EXPIRED", "AUTH_EXPIRED"].includes(apiError.code)) error.textContent = "Authentication could not be completed. Please try again.";
+    else error.textContent = apiError.message;
     error.hidden = false;
     $("#login-password").value = "";
     $("#login-password").focus();
   } finally {
+    authState.loginPending = false;
     button.disabled = false;
     button.textContent = failed ? "Try Again" : "Sign In";
   }
@@ -411,8 +416,8 @@ async function mutateRequest(action, requestId, payload, successMessage, button,
   requestState.mutating[requestId]=action;
   if (button) { button.disabled=true; button.dataset.oldText=button.textContent; button.textContent=busyLabels[action]||"Working…"; }
   const applyResult=result=>{if(!result?.request)return;const updated=normalizeRequest(result.request),masterIndex=requestState.queueMaster.findIndex(row=>row.requestId===requestId);requestState.queueVersion+=1;if(masterIndex>=0)requestState.queueMaster[masterIndex]=updated;else requestState.queueMaster.unshift(updated);requestState.loaded.queue=true;applyQueueFilter();const cached=requestState.detailCache[requestId];requestState.detailCache[requestId]=cached?{...cached,request:{...cached.request,...result.request}}:{request:result.request,history:[]};saveSessionCache()};
-  try { const result=await authenticatedPost(action,{requestId,...payload});applyResult(result);closeModals();showToast(action==="takeRequest"?`${requestId} taken successfully — now in Processing`:successMessage);if(options.reopenDetails)openDetails(requestId);setTimeout(()=>{loadDashboard({silent:true});if(allowedViews().includes("csp-queue"))loadQueue({silent:true,force:true})},0);return true; }
-  catch(e){if(["TIMEOUT","UPSTREAM_TIMEOUT"].includes(e.code)){try{const confirmed=await authenticatedPost("requestDetails",{requestId}),expected={takeRequest:"Processing",completeRequest:"Completed",unableRequest:"Unable",cancelRequest:"Cancelled"}[action],record=confirmed?.request;if(record?.Status===expected){if(action==="takeRequest"&&record.Taken_By_ID!==authState.user.userId){showToast(`Request already taken by ${record.Taken_By_Name||"another CSP user"}.`);return false}applyResult({request:record});closeModals();showToast(action==="takeRequest"?`${requestId} taken successfully — now in Processing`:successMessage);return true}if(action==="takeRequest"&&record?.Status==="Processing")showToast(`Request already taken by ${record.Taken_By_Name||"another CSP user"}.`);else showToast("The update was not confirmed. You can safely retry.")}catch{showToast("The update could not be confirmed. Refresh before retrying.")}}else{const handler=e.data?.handler?` Current handler: ${e.data.handler}.`:"";showToast(`${e.message}${handler}`)}return false}
+  try { const result=await authenticatedPost(action,{requestId,...payload});applyResult(result);closeModals();showToast(action==="takeRequest"?`${requestId} taken successfully — now in Processing`:successMessage);if(action==="takeRequest"||options.reopenDetails)openDetails(requestId);setTimeout(()=>{loadDashboard({silent:true});if(allowedViews().includes("csp-queue"))loadQueue({silent:true,force:true})},0);return true; }
+  catch(e){if(["TIMEOUT","UPSTREAM_TIMEOUT"].includes(e.code)){try{const confirmed=await authenticatedPost("requestDetails",{requestId}),expected={takeRequest:"Processing",completeRequest:"Completed",unableRequest:"Unable",cancelRequest:"Cancelled"}[action],record=confirmed?.request;if(record?.Status===expected){if(action==="takeRequest"&&record.Taken_By_ID!==authState.user.userId){showToast(`Request already taken by ${record.Taken_By_Name||"another CSP user"}.`);return false}applyResult({request:record});closeModals();showToast(action==="takeRequest"?`${requestId} taken successfully — now in Processing`:successMessage);if(action==="takeRequest"||options.reopenDetails)openDetails(requestId);return true}if(action==="takeRequest"&&record?.Status==="Processing")showToast(`Request already taken by ${record.Taken_By_Name||"another CSP user"}.`);else showToast("The update was not confirmed. You can safely retry.")}catch{showToast("The update could not be confirmed. Refresh before retrying.")}}else{const handler=e.data?.handler?` Current handler: ${e.data.handler}.`:"";showToast(`${e.message}${handler}`)}return false}
   finally { delete requestState.mutating[requestId];if(button){button.disabled=false;button.textContent=button.dataset.oldText||"Confirm"} }
 }
 function confirmRequestAction(title,copy,label,callback){$("#request-confirm-title").textContent=title;$("#request-confirm-copy").textContent=copy;const button=$("#request-confirm-button");button.textContent=label;button.onclick=()=>callback(button);openModal("request-confirm-modal")}
