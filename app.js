@@ -1,5 +1,5 @@
 const catalogState = { brands: [], requestTypes: [], loaded: false, loading: false };
-const requestState = { dashboard: null, my: [], team: [], queue: [], queueMaster: [], reports: [], detailCache: {}, queueStatus: "Active", queueVersion: 0, loading: {}, loaded: {}, sequence: {}, inFlight: {}, mutating: {}, duplicatePayload: null, submittedTicket: null, activeDetailId: null, refreshTimer: null, lastAutoRefresh: 0, filterTimers: {} };
+const requestState = { dashboard: null, my: [], team: [], queue: [], queueMaster: [], reports: [], reportCache: {}, activeReportKey: "", detailCache: {}, queueStatus: "Active", queueVersion: 0, loading: {}, loaded: {}, sequence: {}, inFlight: {}, mutating: {}, duplicatePayload: null, submittedTicket: null, activeDetailId: null, refreshTimer: null, lastAutoRefresh: 0, filterTimers: {} };
 const API_URL = "/api";
 const API_TIMEOUT_MS = 28000;
 const TOKEN_STORAGE_KEY = "opsRequestHubSession";
@@ -11,7 +11,7 @@ const ROLE_ACCESS = {
   SUPER_ADMIN: { views: ["dashboard", "new-request", "my-requests", "team-requests", "csp-queue", "reports", "user-management"], defaultView: "dashboard", label: "Super Admin" }
 };
 const authState = { user: null, token: null };
-const adminState = { users: [], loaded: false };
+const adminState = { users: [], loaded: false, loading: false };
 
 class ApiError extends Error {
   constructor(message, code = "REQUEST_ERROR", data = null) { super(message); this.name = "ApiError"; this.code = code; this.data = data; }
@@ -76,9 +76,9 @@ function authenticatedRead(action,payload={}){const key=cacheKey(action,payload)
 function allowedViews() { return ROLE_ACCESS[authState.user?.role]?.views || []; }
 function defaultView() { return ROLE_ACCESS[authState.user?.role]?.defaultView || "dashboard"; }
 function cacheKey(resource,params={}){return `${resource}:${JSON.stringify(params)}`}
-function saveSessionCache(){if(!authState.user)return;sessionStorage.setItem(DATA_CACHE_KEY,JSON.stringify({userId:authState.user.userId,catalogs:{brands:catalogState.brands,requestTypes:catalogState.requestTypes},dashboard:requestState.dashboard,my:requestState.my,team:requestState.team,queueMaster:requestState.queueMaster.map(row=>row.raw),reports:requestState.reports,detailCache:requestState.detailCache,loaded:{dashboard:!!requestState.loaded.dashboard,my:!!requestState.loaded.my,team:!!requestState.loaded.team,queue:!!requestState.loaded.queue,reports:!!requestState.loaded.reports}}))}
-function restoreSessionCache(user){try{const data=JSON.parse(sessionStorage.getItem(DATA_CACHE_KEY)||"null");if(!data||data.userId!==user.userId)return;catalogState.brands=data.catalogs?.brands||[];catalogState.requestTypes=data.catalogs?.requestTypes||[];catalogState.loaded=!!(catalogState.brands.length||catalogState.requestTypes.length);requestState.dashboard=data.dashboard||null;requestState.my=data.my||[];requestState.team=data.team||[];requestState.queueMaster=(data.queueMaster||[]).map(normalizeRequest);requestState.reports=data.reports||[];requestState.detailCache=data.detailCache||{};requestState.loaded={...requestState.loaded,...data.loaded,queue:!!requestState.queueMaster.length};}catch{sessionStorage.removeItem(DATA_CACHE_KEY)}}
-function clearAuth() { localStorage.removeItem(TOKEN_STORAGE_KEY); sessionStorage.removeItem(DATA_CACHE_KEY); authState.token = null; authState.user = null; adminState.users = []; adminState.loaded = false; catalogState.brands=[];catalogState.requestTypes=[];catalogState.loaded=false;requestState.dashboard=null;requestState.my=[];requestState.team=[];requestState.queue=[];requestState.queueMaster=[];requestState.queueVersion=0;requestState.reports=[];requestState.detailCache={};requestState.loaded={};requestState.inFlight={};requestState.mutating={};clearInterval(requestState.refreshTimer); Object.values(requestState.filterTimers).forEach(clearTimeout); requestState.refreshTimer=null; requestState.filterTimers={}; }
+function saveSessionCache(){if(!authState.user)return;sessionStorage.setItem(DATA_CACHE_KEY,JSON.stringify({userId:authState.user.userId,catalogs:{brands:catalogState.brands,requestTypes:catalogState.requestTypes},dashboard:requestState.dashboard,my:requestState.my,team:requestState.team,queueMaster:requestState.queueMaster.map(row=>row.raw),reportCache:requestState.reportCache,detailCache:requestState.detailCache,adminUsers:authState.user.role==="SUPER_ADMIN"&&adminState.loaded?adminState.users:undefined,loaded:{dashboard:!!requestState.loaded.dashboard,my:!!requestState.loaded.my,team:!!requestState.loaded.team,queue:!!requestState.loaded.queue,reports:!!requestState.loaded.reports}}))}
+function restoreSessionCache(user){try{const data=JSON.parse(sessionStorage.getItem(DATA_CACHE_KEY)||"null");if(!data||data.userId!==user.userId)return;catalogState.brands=data.catalogs?.brands||[];catalogState.requestTypes=data.catalogs?.requestTypes||[];catalogState.loaded=!!(catalogState.brands.length||catalogState.requestTypes.length);requestState.dashboard=data.dashboard||null;requestState.my=data.my||[];requestState.team=data.team||[];requestState.queueMaster=(data.queueMaster||[]).map(normalizeRequest);requestState.reportCache=data.reportCache||{};requestState.detailCache=data.detailCache||{};if(user.role==="SUPER_ADMIN"&&Array.isArray(data.adminUsers)){adminState.users=data.adminUsers;adminState.loaded=true}requestState.loaded={...requestState.loaded,...data.loaded,queue:!!requestState.queueMaster.length};}catch{sessionStorage.removeItem(DATA_CACHE_KEY)}}
+function clearAuth() { localStorage.removeItem(TOKEN_STORAGE_KEY); sessionStorage.removeItem(DATA_CACHE_KEY); authState.token = null; authState.user = null; adminState.users = []; adminState.loaded = false; adminState.loading=false; catalogState.brands=[];catalogState.requestTypes=[];catalogState.loaded=false;requestState.dashboard=null;requestState.my=[];requestState.team=[];requestState.queue=[];requestState.queueMaster=[];requestState.queueVersion=0;requestState.reports=[];requestState.reportCache={};requestState.activeReportKey="";requestState.detailCache={};requestState.loaded={};requestState.inFlight={};requestState.mutating={};clearInterval(requestState.refreshTimer); Object.values(requestState.filterTimers).forEach(clearTimeout); requestState.refreshTimer=null; requestState.filterTimers={}; }
 function showLogin(message = "") {
   $("#app-shell").hidden = true;
   $("#auth-shell").hidden = false;
@@ -179,7 +179,10 @@ function reportFilterLabels(){const f=reportFilters(),labels=[];if(f.fromDate||f
 function renderReportFilters(){const labels=reportFilterLabels(),bar=$("#report-active-filters");bar.hidden=!labels.length;bar.innerHTML=labels.length?`<strong>Active filters</strong>${labels.map(label=>`<span>${escapeHtml(label)}</span>`).join("")}`:""}
 function resetReportFilters(){["report-from","report-to","report-brand","report-type","report-status","report-requester","report-handler"].forEach(id=>{$(`#${id}`).value=""});renderReportFilters();loadReports()}
 function updateReportEmpty(){if(requestState.reports.length)return;$("#report-table").innerHTML='<tr><td colspan="8"><div class="report-empty"><strong>No requests match the current filters.</strong><span>Review the active filters above or clear them to see all available requests.</span><button class="secondary-button" data-clear-report-filters type="button">Clear Filters</button></div></td></tr>'}
-async function loadReports(){if(!["CSP_ADMIN","SUPER_ADMIN"].includes(authState.user?.role)||requestState.loading.reports)return;requestState.loading.reports=true;try{const data=await authenticatedRead("reports",reportFilters());requestState.reports=data.requests||[];const m=data.metrics||{},cards=[["Total Requests",m.total],["Completed",m.completed],["Unable",m.unable],["Pending",m.pending],["Avg Waiting",formatDuration(m.averageWaiting)],["Avg Handling",formatDuration(m.averageHandling)],["Avg Resolution",formatDuration(m.averageTotal)]];$("#report-stats").innerHTML=cards.map(x=>`<article class="stat-card"><div><strong>${escapeHtml(x[1]??"—")}</strong><span>${escapeHtml(x[0])}</span></div></article>`).join("");$("#report-summary").textContent=`${requestState.reports.length} matching request${requestState.reports.length===1?"":"s"}`;$("#report-table").innerHTML=requestState.reports.map(r=>`<tr><td><button class="ticket-button" data-ticket="${escapeHtml(r.Request_ID)}">${escapeHtml(r.Request_ID)}</button></td><td>${escapeHtml(r.Brand)}</td><td>${escapeHtml(r.Request_Type)}</td><td>${statusBadge(r.Status)}</td><td>${escapeHtml(r.Requested_By_Name||"—")}</td><td>${escapeHtml(r.Taken_By_Name||"—")}</td><td>${escapeHtml(formatDate(r.Requested_At))}</td><td>${escapeHtml(formatDuration(r.Total_Seconds))}</td></tr>`).join("")||'<tr class="table-loading"><td colspan="8">No matching requests.</td></tr>';saveSessionCache()}catch(e){showToast(e.message)}finally{requestState.loading.reports=false}}
+function reportCacheKey(){return cacheKey("reports",reportFilters())}
+function cacheReport(key,data){requestState.reportCache[key]=data;const keys=Object.keys(requestState.reportCache);if(keys.length>6)delete requestState.reportCache[keys[0]]}
+function renderReportData(data,refreshing=false){requestState.reports=data.requests||[];const m=data.metrics||{},cards=[["Total Requests",m.total],["Completed",m.completed],["Unable",m.unable],["Pending",m.pending],["Avg Waiting",formatDuration(m.averageWaiting)],["Avg Handling",formatDuration(m.averageHandling)],["Avg Resolution",formatDuration(m.averageTotal)]];$("#report-stats").innerHTML=cards.map(x=>`<article class="stat-card"><div><strong>${escapeHtml(x[1]??"—")}</strong><span>${escapeHtml(x[0])}</span></div></article>`).join("");$("#report-summary").innerHTML=`${requestState.reports.length} matching request${requestState.reports.length===1?"":"s"}${refreshing?' <span class="refreshing-label">Refreshing…</span>':""}`;$("#report-table").innerHTML=requestState.reports.map(r=>`<tr><td><button class="ticket-button" data-ticket="${escapeHtml(r.Request_ID)}">${escapeHtml(r.Request_ID)}</button></td><td>${escapeHtml(r.Brand)}</td><td>${escapeHtml(r.Request_Type)}</td><td>${statusBadge(r.Status)}</td><td>${escapeHtml(r.Requested_By_Name||"—")}</td><td>${escapeHtml(r.Taken_By_Name||"—")}</td><td>${escapeHtml(formatDate(r.Requested_At))}</td><td>${escapeHtml(formatDuration(r.Total_Seconds))}</td></tr>`).join("");if(!requestState.reports.length)updateReportEmpty()}
+async function loadReports(){if(!["CSP_ADMIN","SUPER_ADMIN"].includes(authState.user?.role))return;const filters=reportFilters(),key=reportCacheKey(),cached=requestState.reportCache[key];requestState.activeReportKey=key;if(cached)renderReportData(cached,true);if(requestState.loading[key])return;requestState.loading[key]=true;if(!cached){$("#report-summary").textContent="Loading report…";$("#report-table").innerHTML='<tr class="table-loading"><td colspan="8">Loading report results…</td></tr>'}try{const data=await authenticatedRead("reports",filters);cacheReport(key,data);requestState.loaded.reports=true;if(requestState.activeReportKey===key)renderReportData(data);saveSessionCache()}catch(e){if(requestState.activeReportKey!==key)return;if(cached){renderReportData(cached);$("#report-summary").innerHTML+=` <span class="refresh-error">Refresh failed —</span> <button class="text-button" data-retry-reports>Retry</button>`}else{$("#report-summary").innerHTML=`Unable to load report. <button class="text-button" data-retry-reports>Retry</button>`;$("#report-table").innerHTML=""}}finally{delete requestState.loading[key]}}
 function csvCell(value){const text=String(value??"");return `"${text.replaceAll('"','""')}"`}
 function exportReports(){const fields=["Request_ID","Brand","Request_Type","Player_Username","Affiliate_Username","Phone_Number","Email","Status","Requested_By_ID","Requested_By_Name","Requested_At","Taken_By_ID","Taken_By_Name","Taken_At","Completed_By_ID","Completed_By_Name","Completed_At","Unable_Reason","Cancelled_By_ID","Cancelled_At","Waiting_Seconds","Handling_Seconds","Total_Seconds"],csv=[fields.join(","),...requestState.reports.map(r=>fields.map(f=>csvCell(r[f])).join(","))].join("\r\n"),url=URL.createObjectURL(new Blob(["\uFEFF",csv],{type:"text/csv;charset=utf-8"})),link=document.createElement("a");link.href=url;link.download=`ops-request-report-${new Date().toISOString().slice(0,10)}.csv`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 function renderDuplicates(items){$("#duplicate-list").innerHTML=items.map(r=>`<div class="duplicate-item"><strong>${escapeHtml(r.requestId)}</strong><span>${escapeHtml(r.brand)} · ${escapeHtml(r.requestType)} · ${escapeHtml(r.status)}</span><small>${escapeHtml(r.requestedBy||"—")} · ${escapeHtml(formatDate(r.requestedAt))}</small></div>`).join("")}
@@ -222,24 +225,22 @@ function clearSensitiveFields() {
 }
 function findAdminUser(userId) { return adminState.users.find(user => user.userId === userId); }
 
-async function loadUsers() {
+async function loadUsers({force=false}={}) {
   if (authState.user?.role !== "SUPER_ADMIN") return;
-  $("#user-result-summary").textContent = "Loading users…";
-  $("#users-table").innerHTML = '<tr class="table-loading"><td colspan="10">Loading user accounts…</td></tr>';
-  $("#users-empty").hidden = true;
+  if(adminState.loaded){renderUsers();$("#user-result-summary").innerHTML+= ' <span class="refreshing-label">Refreshing…</span>'}
+  if(adminState.loading)return;
+  adminState.loading=true;
+  if(!adminState.loaded){$("#user-result-summary").textContent = "Loading users…";$("#users-table").innerHTML = '<tr class="table-loading"><td colspan="10">Loading user accounts…</td></tr>';$("#users-empty").hidden = true}
   try {
-    const data = await authenticatedPost("listUsers");
+    const data = await authenticatedRead("listUsers");
     adminState.users = Array.isArray(data?.users) ? data.users : [];
     adminState.loaded = true;
-    renderUsers();
+    renderUsers();saveSessionCache();
   } catch (error) {
     if (error.code === "UNAUTHORIZED") return;
-    $("#users-table").innerHTML = "";
-    $("#user-result-summary").textContent = error.message;
-    $("#users-empty").hidden = false;
-    $("#users-empty h3").textContent = "Unable to load users";
-    $("#users-empty p").textContent = "Please try again.";
-  }
+    if(adminState.loaded){renderUsers();$("#user-result-summary").innerHTML+= ' <span class="refresh-error">Refresh failed —</span> <button class="text-button" data-retry-users>Retry</button>'}
+    else{$("#users-table").innerHTML = "";$("#user-result-summary").innerHTML = `Unable to load users. <button class="text-button" data-retry-users>Retry</button>`;$("#users-empty").hidden = false;$("#users-empty h3").textContent = "Unable to load users";$("#users-empty p").textContent = "Please retry when the service is available."}
+  } finally {adminState.loading=false}
 }
 
 function renderUsers() {
@@ -312,8 +313,8 @@ async function submitAddUser(event) {
   if (password !== $("#add-user-confirm").value) { setFormMessage("add-user-message", "Passwords do not match."); return; }
   setFormBusy(form, true, "Creating…");
   try {
-    await authenticatedPost("createUser", { name: $("#add-user-name").value, username: $("#add-user-username").value, team: $("#add-user-team").value, role: $("#add-user-role").value, password });
-    closeModals(); showToast("User created successfully."); await loadUsers();
+    const result=await authenticatedPost("createUser", { name: $("#add-user-name").value, username: $("#add-user-username").value, team: $("#add-user-team").value, role: $("#add-user-role").value, password });
+    if(result?.user){adminState.users.push(result.user);adminState.loaded=true;renderUsers();saveSessionCache()}closeModals(); showToast("User created successfully."); setTimeout(()=>loadUsers({force:true}),0);
   } catch (error) { setFormMessage("add-user-message", error.message); }
   finally { setFormBusy(form, false); clearSensitiveFields(); }
 }
@@ -323,8 +324,8 @@ async function submitEditUser(event) {
   if (!form.checkValidity()) { form.reportValidity(); return; }
   setFormBusy(form, true, "Saving…");
   try {
-    await authenticatedPost("updateUser", { userId: $("#edit-user-id").value, name: $("#edit-user-name").value, team: $("#edit-user-team").value, role: $("#edit-user-role").value });
-    closeModals(); showToast("User updated successfully."); await loadUsers();
+    const result=await authenticatedPost("updateUser", { userId: $("#edit-user-id").value, name: $("#edit-user-name").value, team: $("#edit-user-team").value, role: $("#edit-user-role").value });
+    if(result?.user){const index=adminState.users.findIndex(user=>user.userId===result.user.userId);if(index>=0)adminState.users[index]=result.user;renderUsers();saveSessionCache()}closeModals(); showToast("User updated successfully."); setTimeout(()=>loadUsers({force:true}),0);
   } catch (error) { setFormMessage("edit-user-message", error.message); }
   finally { setFormBusy(form, false); }
 }
@@ -337,7 +338,7 @@ async function submitResetPassword(event) {
   setFormBusy(form, true, "Updating…");
   try {
     await authenticatedPost("resetUserPassword", { userId: $("#reset-password-user-id").value, newPassword });
-    closeModals(); showToast("Password reset successfully.");
+    closeModals(); showToast("Password reset successfully."); setTimeout(()=>loadUsers({force:true}),0);
   } catch (error) { setFormMessage("reset-password-message", error.message); }
   finally { setFormBusy(form, false); clearSensitiveFields(); }
 }
@@ -347,8 +348,8 @@ async function submitUserStatus(event) {
   setFormBusy(form, true, "Updating…");
   const status = $("#status-user-value").value;
   try {
-    await authenticatedPost("setUserStatus", { userId: $("#status-user-id").value, status });
-    closeModals(); showToast(`User ${status === "Active" ? "activated" : "deactivated"}.`); await loadUsers();
+    const result=await authenticatedPost("setUserStatus", { userId: $("#status-user-id").value, status });
+    const userId=$("#status-user-id").value,index=adminState.users.findIndex(user=>user.userId===userId);if(result?.user&&index>=0)adminState.users[index]=result.user;else if(index>=0)adminState.users[index]={...adminState.users[index],status};renderUsers();saveSessionCache();closeModals(); showToast(`User ${status === "Active" ? "activated" : "deactivated"}.`); setTimeout(()=>loadUsers({force:true}),0);
   } catch (error) { setFormMessage("user-status-message", error.message); }
   finally { setFormBusy(form, false); }
 }
@@ -432,7 +433,7 @@ function initialize() {
   $("#run-reports").addEventListener("click",async()=>{renderReportFilters();await loadReports();updateReportEmpty()});$("#reset-reports").addEventListener("click",resetReportFilters);$("#export-reports").addEventListener("click",exportReports);
   $("#submit-another").addEventListener("click",()=>{closeModals();navigate("new-request")});$("#view-submitted-request").addEventListener("click",()=>{const ticket=requestState.submittedTicket;closeModals();navigate("my-requests");if(ticket)openDetails(ticket)});
   document.addEventListener("click",e=>{const metric=e.target.closest("[data-metric-status]")?.dataset.metricStatus;if(metric){if(["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role)){requestState.queueStatus=metric;navigate("csp-queue")}else{$("#my-status").value=metric;navigate("my-requests")}}const ticket=e.target.closest("[data-ticket]")?.dataset.ticket;if(ticket)openDetails(ticket);const retryDetails=e.target.closest("[data-retry-details]")?.dataset.retryDetails;if(retryDetails)openDetails(retryDetails);const take=e.target.closest("[data-take]")?.dataset.take;if(take&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role))mutateRequest("takeRequest",take,{},`Request ${take} is now processing.`,e.target);const complete=e.target.closest("[data-complete]")?.dataset.complete;if(complete&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role)){const reopen=!!e.target.closest("#details-modal");confirmRequestAction("Complete Request",`Mark ${complete} as completed?`,"Complete Request",button=>mutateRequest("completeRequest",complete,{},`Request ${complete} completed.`,button,{reopenDetails:reopen}))}const unable=e.target.closest("[data-unable]")?.dataset.unable;if(unable&&["CSP_STAFF","CSP_ADMIN","SUPER_ADMIN"].includes(authState.user.role)){requestState.reopenAfterMutation=!!e.target.closest("#details-modal");$("#unable-ticket").value=unable;openModal("unable-modal")}const cancel=e.target.closest("[data-cancel]")?.dataset.cancel;if(cancel&&["BDT_STAFF","SUPER_ADMIN"].includes(authState.user.role))confirmRequestAction("Cancel Request",`Cancel pending request ${cancel}?`,"Cancel Request",button=>mutateRequest("cancelRequest",cancel,{},`Request ${cancel} cancelled.`,button));if(e.target.closest("[data-retry-queue]"))loadQueue();if(e.target.closest("[data-close-modal]")||e.target.classList.contains("modal-backdrop"))closeModals();const copy=e.target.closest("[data-copy]")?.dataset.copy;if(copy)copyValue(copy)});
-  document.addEventListener("click",e=>{if(e.target.closest("[data-clear-report-filters]"))resetReportFilters();const kind=e.target.closest("[data-retry-list]")?.dataset.retryList;if(kind)loadRequestList(kind)});
+  document.addEventListener("click",e=>{if(e.target.closest("[data-clear-report-filters]"))resetReportFilters();if(e.target.closest("[data-retry-reports]"))loadReports();if(e.target.closest("[data-retry-users]"))loadUsers({force:true});const kind=e.target.closest("[data-retry-list]")?.dataset.retryList;if(kind)loadRequestList(kind)});
   document.addEventListener("keydown",e=>{if(e.key==="Escape")closeModals()});
   window.addEventListener("hashchange", () => { if (authState.user) navigate(location.hash.slice(1)); });
   $("#login-form").addEventListener("submit", submitLogin);
