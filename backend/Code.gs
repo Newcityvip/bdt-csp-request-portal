@@ -37,6 +37,12 @@ const ROLES = {
   SUPER: "SUPER_ADMIN",
 };
 
+const CSP_CASE_TYPES = {
+  "Customer Available for Call": true,
+  "Wrong Currency Signup": true,
+  "High Balance Unlock / Verify": true,
+};
+
 const SESSION_SECONDS = 8 * 60 * 60;
 const SESSION_CACHE_SECONDS = 6 * 60 * 60;
 const PASSWORD_VERSION = "v3";
@@ -112,6 +118,7 @@ function handleApi_(e, method) {
       myRequests: function () { return success_(myRequests_(input)); },
       teamRequests: function () { return success_(teamRequests_(input)); },
       cspQueue: function () { return success_(cspQueue_(input)); },
+      bdtQueue: function () { return success_(bdtQueue_(input)); },
       takeRequest: function () { return success_(takeRequest_(input)); },
       completeRequest: function () { return success_(completeRequest_(input)); },
       unableRequest: function () { return success_(unableRequest_(input)); },
@@ -323,10 +330,24 @@ function teamRequests_(input) {
 function cspQueue_(input) {
   requireRole_(input.token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]);
   const status = cleanString_(input.status || "Active", 30);
+  const cspCaseIds = cspCaseRequestIds_();
   const queue = filterRequestRows_(readRows_(SHEETS.REQUESTS), mergeObjects_(input, { status: "" }))
+    .filter(function (row) { return !cspCaseIds[cleanString_(row.Request_ID, 100)]; })
     .filter(function (row) { return status === "All" || (status === "Active" ? ACTIVE_REQUEST_STATUSES.indexOf(cleanString_(row.Status, 30)) !== -1 : row.Status === status); })
     .sort(function (a, b) { return dateMs_(a.Requested_At) - dateMs_(b.Requested_At); })
     .map(projectQueueRequest_);
+  return { requests: queue, count: queue.length };
+}
+
+function bdtQueue_(input) {
+  requireRole_(input.token, [ROLES.BDT]);
+  const status = cleanString_(input.status || "Active", 30);
+  const cspCaseIds = cspCaseRequestIds_();
+  const queue = filterRequestRows_(readRows_(SHEETS.REQUESTS), mergeObjects_(input, { status: "" }))
+    .filter(function (row) { return cspCaseIds[cleanString_(row.Request_ID, 100)] === true; })
+    .filter(function (row) { return status === "All" || (status === "Active" ? ACTIVE_REQUEST_STATUSES.indexOf(cleanString_(row.Status, 30)) !== -1 : row.Status === status); })
+    .sort(function (a, b) { return dateMs_(a.Requested_At) - dateMs_(b.Requested_At); })
+    .map(projectBdtQueueRequest_);
   return { requests: queue, count: queue.length };
 }
 
@@ -359,14 +380,9 @@ function searchTickets_(input) {
 
 function createCspCase_(input) {
   const session = requireRole_(input.token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]);
-  const definitions = {
-    "Customer Available for Call": true,
-    "Wrong Currency Signup": true,
-    "High Balance Unlock / Verify": true,
-  };
   const requestType = cleanString_(input.requestType, 150);
   const brand = cleanString_(input.brand, 50);
-  if (!definitions[requestType]) throw new ApiError_("The selected CSP case type is not available.", "INVALID_REQUEST_TYPE");
+  if (!CSP_CASE_TYPES[requestType]) throw new ApiError_("The selected CSP case type is not available.", "INVALID_REQUEST_TYPE");
   const brandRow = readRows_(SHEETS.BRANDS).find(function (row) { return isTrue_(row.Active) && cleanString_(row.Brand_Code, 50) === brand; });
   if (!brandRow) throw new ApiError_("The selected brand is not available.", "INVALID_BRAND");
 
@@ -384,8 +400,8 @@ function createCspCase_(input) {
     values.Notes = notes;
   } else if (requestType === "Wrong Currency Signup") {
     const currentCurrency = cleanString_(input.currentCurrency, 30), correctCurrency = cleanString_(input.correctCurrency, 30);
-    if (!player || !currentCurrency || !correctCurrency) throw new ApiError_("Player username and both currencies are required.", "VALIDATION_ERROR");
-    values.Player_Username = player;
+    if (!affiliate || !currentCurrency || !correctCurrency) throw new ApiError_("Affiliate username and both currencies are required.", "VALIDATION_ERROR");
+    values.Affiliate_Username = affiliate;
     values.Notes = "Current Currency: " + currentCurrency + "\nCorrect Currency: " + correctCurrency + (notes ? "\n\n" + notes : "");
   } else {
     if (!player) throw new ApiError_("Player username is required.", "VALIDATION_ERROR");
@@ -398,13 +414,12 @@ function createCspCase_(input) {
   try {
     const table = getTable_(SHEETS.REQUESTS), now = new Date();
     values.Request_ID = nextRequestId_(table.rows);
-    values.Status = "Processing";
+    values.Status = "Pending";
     values.Requested_By_ID = session.userId; values.Requested_By_Name = session.name; values.Requested_At = now;
-    values.Taken_By_ID = session.userId; values.Taken_By_Name = session.name; values.Taken_At = now;
-    values.Waiting_Seconds = 0; values.Last_Updated_At = now;
+    values.Last_Updated_At = now;
     appendObjectRow_(table, values);
-    appendHistory_(values.Request_ID, "CSP Case Created", "", "Processing", session, requestType);
-    return { created: true, ticket: values.Request_ID, request: projectRequest_(values) };
+    appendHistory_(values.Request_ID, "CSP Case Created", "", "Pending", session, requestType);
+    return { created: true, ticket: values.Request_ID, request: projectBdtRequest_(values) };
   } finally { lock.releaseLock(); }
 }
 
@@ -507,9 +522,10 @@ function inboxMarkRead_(input) {
 }
 
 function takeRequest_(input) {
-  const session = requireRole_(input.token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]);
+  const session = requireSession_(input.token);
   const requestId = requireRequestId_(input.requestId);
   return withRequestLock_(requestId, function (table, request) {
+    requireHandlerRole_(session, request);
     if (request.Status !== "Pending") {
       throw new ApiError_("This request is no longer pending.", "REQUEST_CONFLICT", {
         status: request.Status,
@@ -524,18 +540,18 @@ function takeRequest_(input) {
     };
     updateObjectRow_(table, request._row, updates);
     appendHistory_(requestId, "Taken", "Pending", "Processing", session, "");
-    return { request: projectRequest_(mergeObjects_(request, updates)) };
+    return { request: projectHandledRequest_(mergeObjects_(request, updates)) };
   });
 }
 
 function completeRequest_(input) {
-  const session = requireRole_(input.token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]);
+  const session = requireSession_(input.token);
   const requestId = requireRequestId_(input.requestId);
   return finalizeRequest_(requestId, session, "Completed", "", "Completed");
 }
 
 function unableRequest_(input) {
-  const session = requireRole_(input.token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]);
+  const session = requireSession_(input.token);
   const requestId = requireRequestId_(input.requestId);
   const reason = cleanString_(input.reason, 1000);
   if (!reason) throw new ApiError_("An unable reason is required.", "VALIDATION_ERROR");
@@ -544,8 +560,9 @@ function unableRequest_(input) {
 
 function finalizeRequest_(requestId, session, newStatus, reason, action) {
   return withRequestLock_(requestId, function (table, request) {
+    requireHandlerRole_(session, request);
     if (request.Status !== "Processing") throw new ApiError_("Only a processing request can be updated.", "REQUEST_CONFLICT", { status: request.Status });
-    if (session.role === ROLES.CSP && cleanString_(request.Taken_By_ID, 100) !== session.userId) {
+    if ((isCspCaseRequest_(request) || session.role === ROLES.CSP) && cleanString_(request.Taken_By_ID, 100) !== session.userId) {
       throw new ApiError_("This request is being handled by another user.", "FORBIDDEN");
     }
     const now = new Date();
@@ -558,7 +575,7 @@ function finalizeRequest_(requestId, session, newStatus, reason, action) {
     if (newStatus === "Unable") updates.Unable_Reason = reason;
     updateObjectRow_(table, request._row, updates);
     appendHistory_(requestId, action, "Processing", newStatus, session, reason);
-    return { request: projectRequest_(mergeObjects_(request, updates)) };
+    return { request: projectHandledRequest_(mergeObjects_(request, updates)) };
   });
 }
 
@@ -590,7 +607,7 @@ function requestDetails_(input) {
     .map(function (row) {
       return selectFields_(row, ["History_ID", "Request_ID", "Action", "Old_Status", "New_Status", "Performed_By_ID", "Performed_By_Name", "Performed_By_Team", "Details", "Created_At"]);
     });
-  return { request: projectRequest_(request), history: history };
+  return { request: projectHandledRequest_(request), history: history };
 }
 
 function dashboard_(input) {
@@ -1140,11 +1157,43 @@ function listResponse_(requests) {
 function authorizeRequestView_(session, request) {
   if (session.role === ROLES.SUPER || session.role === ROLES.CSP || session.role === ROLES.CSP_ADMIN) return;
   if (session.role === ROLES.BDT) {
+    if (isCspCaseRequest_(request)) return;
     if (request.Requested_By_ID === session.userId) return;
     const requester = readRows_(SHEETS.USERS).find(function (user) { return cleanString_(user.User_ID, 100) === cleanString_(request.Requested_By_ID, 100); });
     if (requester && cleanString_(requester.Team, 50).toUpperCase() === "BDT") return;
   }
   throw new ApiError_("You are not authorized to view this request.", "FORBIDDEN");
+}
+
+function cspCaseRequestIds_() {
+  const ids = {};
+  readRows_(SHEETS.HISTORY).forEach(function (row) {
+    if (cleanString_(row.Action, 100) === "CSP Case Created") ids[cleanString_(row.Request_ID, 100)] = true;
+  });
+  return ids;
+}
+
+function isCspCaseRequest_(request) {
+  if (!CSP_CASE_TYPES[cleanString_(request.Request_Type, 150)]) return false;
+  return findObjectRows_(SHEETS.HISTORY, "Request_ID", cleanString_(request.Request_ID, 100), true)
+    .some(function (row) { return cleanString_(row.Action, 100) === "CSP Case Created"; });
+}
+
+function requireHandlerRole_(session, request) {
+  const roles = isCspCaseRequest_(request) ? [ROLES.BDT] : [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER];
+  if (roles.indexOf(session.role) === -1) throw new ApiError_("You are not authorized for this action.", "FORBIDDEN");
+}
+
+function projectHandledRequest_(row) {
+  const request = projectRequest_(row);
+  if (isCspCaseRequest_(row)) request.Processing_Team = "BDT";
+  return request;
+}
+
+function projectBdtRequest_(row) {
+  const request = projectRequest_(row);
+  request.Processing_Team = "BDT";
+  return request;
 }
 
 function projectRequest_(row) {
@@ -1157,6 +1206,12 @@ function projectListRequest_(row) {
 
 function projectQueueRequest_(row) {
   return selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Requested_By_Name", "Requested_At", "Status", "Taken_By_ID", "Taken_By_Name", "Taken_At"]);
+}
+
+function projectBdtQueueRequest_(row) {
+  const request = projectQueueRequest_(row);
+  request.Processing_Team = "BDT";
+  return request;
 }
 
 function selectFields_(row, fields) {
