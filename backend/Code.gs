@@ -14,6 +14,8 @@ const SHEETS = {
   CONFIG: "Config",
   // Reference/admin data only. Cloudflare ALLOWED_IPS is the authoritative edge access list.
   ALLOWED_IPS: "Allowed_IPs",
+  INBOX: "CSP_Inbox",
+  INBOX_READ: "CSP_Inbox_Read",
 };
 
 const HEADERS = {
@@ -24,6 +26,8 @@ const HEADERS = {
   Brands: ["Brand_ID", "Brand_Code", "Brand_Name", "Active", "Sort_Order"],
   Config: ["Config_Key", "Config_Value", "Description", "Updated_At"],
   Allowed_IPs: ["IP_ID", "IP_Address", "Label", "Team", "Active", "Created_At", "Notes"],
+  CSP_Inbox: ["Message_ID", "Thread_ID", "Parent_Message_ID", "Message_Type", "Subject", "Message", "Sender_User_ID", "Sender_Name", "Sender_Role", "Recipient_Type", "Recipient_User_ID", "Recipient_Name", "Priority", "Created_At", "Active"],
+  CSP_Inbox_Read: ["Message_ID", "User_ID", "Read_At"],
 };
 
 const ROLES = {
@@ -120,6 +124,15 @@ function handleApi_(e, method) {
       resetUserPassword: function () { return success_(resetUserPassword_(input)); },
       setUserStatus: function () { return success_(setUserStatus_(input)); },
       reports: function () { return success_(reports_(input)); },
+      requestTypeFilters: function () { return success_(requestTypeFilters_(input)); },
+      searchTickets: function () { return success_(searchTickets_(input)); },
+      createCspCase: function () { return success_(createCspCase_(input)); },
+      inboxList: function () { return success_(inboxList_(input)); },
+      inboxThread: function () { return success_(inboxThread_(input)); },
+      inboxSend: function () { return success_(inboxSend_(input)); },
+      inboxReply: function () { return success_(inboxReply_(input)); },
+      inboxRecipients: function () { return success_(inboxRecipients_(input)); },
+      inboxMarkRead: function () { return success_(inboxMarkRead_(input)); },
     };
 
     if (!actions[action]) throw new ApiError_("Unknown action.", "UNKNOWN_ACTION");
@@ -174,6 +187,13 @@ function requestTypes_() {
     });
   staticCachePut_("REQUEST_TYPES_V1", data);
   return success_(data);
+}
+
+function requestTypeFilters_(input) {
+  requireSession_(input.token);
+  const names = readRows_(SHEETS.TYPES).slice().sort(sortByNumber_("Sort_Order")).map(function(row){return cleanString_(row.Request_Type,150);}).filter(Boolean);
+  ["Customer Available for Call", "Wrong Currency Signup", "High Balance Unlock / Verify"].forEach(function(name){if(names.indexOf(name)===-1)names.push(name);});
+  return { requestTypes: names };
 }
 
 function login_(input) {
@@ -323,6 +343,167 @@ function reports_(input) {
   const unable = rows.filter(function(r){return r.Status === "Unable";}).length;
   function average(field){const values=rows.filter(function(r){return r[field] !== "" && r[field] !== null && r[field] !== undefined;}).map(function(r){return Number(r[field]);}).filter(function(v){return Number.isFinite(v)&&v>=0;});return values.length?Math.round(values.reduce(function(a,b){return a+b;},0)/values.length):"";}
   return { requests: rows.map(projectRequest_), metrics: { total: rows.length, completed: completed, unable: unable, pending: rows.filter(function(r){return r.Status==="Pending";}).length, averageWaiting: average("Waiting_Seconds"), averageHandling: average("Handling_Seconds"), averageTotal: average("Total_Seconds") } };
+}
+
+function searchTickets_(input) {
+  requireRole_(input.token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]);
+  const query = cleanString_(input.query, 150).toLowerCase();
+  if (!query || (query.indexOf("req-") !== 0 && query.length < 2)) throw new ApiError_("Enter a ticket ID or at least 2 username characters.", "VALIDATION_ERROR");
+  const exactTicket = query.indexOf("req-") === 0;
+  const matches = readRows_(SHEETS.REQUESTS).filter(function (row) {
+    if (exactTicket) return cleanString_(row.Request_ID, 100).toLowerCase() === query;
+    return cleanString_(row.Player_Username, 150).toLowerCase().indexOf(query) !== -1 || cleanString_(row.Affiliate_Username, 150).toLowerCase().indexOf(query) !== -1;
+  }).sort(newestFirst_).slice(0, 50).map(projectRequest_);
+  return { requests: matches, count: matches.length, limit: 50 };
+}
+
+function createCspCase_(input) {
+  const session = requireRole_(input.token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]);
+  const definitions = {
+    "Customer Available for Call": true,
+    "Wrong Currency Signup": true,
+    "High Balance Unlock / Verify": true,
+  };
+  const requestType = cleanString_(input.requestType, 150);
+  const brand = cleanString_(input.brand, 50);
+  if (!definitions[requestType]) throw new ApiError_("The selected CSP case type is not available.", "INVALID_REQUEST_TYPE");
+  const brandRow = readRows_(SHEETS.BRANDS).find(function (row) { return isTrue_(row.Active) && cleanString_(row.Brand_Code, 50) === brand; });
+  if (!brandRow) throw new ApiError_("The selected brand is not available.", "INVALID_BRAND");
+
+  const values = emptyRequest_();
+  values.Brand = brand;
+  values.Request_Type = requestType;
+  const player = cleanString_(input.playerUsername, fieldLimit_("Player_Username"));
+  const affiliate = cleanString_(input.affiliateUsername, fieldLimit_("Affiliate_Username"));
+  const notes = cleanString_(input.notes, fieldLimit_("Notes"));
+  if (requestType === "Customer Available for Call") {
+    const subjectType = cleanString_(input.subjectType, 20);
+    if (subjectType === "Player" && player) values.Player_Username = player;
+    else if (subjectType === "Affiliate" && affiliate) values.Affiliate_Username = affiliate;
+    else throw new ApiError_("Select a subject type and enter the matching username.", "VALIDATION_ERROR");
+    values.Notes = notes;
+  } else if (requestType === "Wrong Currency Signup") {
+    const currentCurrency = cleanString_(input.currentCurrency, 30), correctCurrency = cleanString_(input.correctCurrency, 30);
+    if (!player || !currentCurrency || !correctCurrency) throw new ApiError_("Player username and both currencies are required.", "VALIDATION_ERROR");
+    values.Player_Username = player;
+    values.Notes = "Current Currency: " + currentCurrency + "\nCorrect Currency: " + correctCurrency + (notes ? "\n\n" + notes : "");
+  } else {
+    if (!player) throw new ApiError_("Player username is required.", "VALIDATION_ERROR");
+    values.Player_Username = player;
+    values.Notes = notes;
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const table = getTable_(SHEETS.REQUESTS), now = new Date();
+    values.Request_ID = nextRequestId_(table.rows);
+    values.Status = "Processing";
+    values.Requested_By_ID = session.userId; values.Requested_By_Name = session.name; values.Requested_At = now;
+    values.Taken_By_ID = session.userId; values.Taken_By_Name = session.name; values.Taken_At = now;
+    values.Waiting_Seconds = 0; values.Last_Updated_At = now;
+    appendObjectRow_(table, values);
+    appendHistory_(values.Request_ID, "CSP Case Created", "", "Processing", session, requestType);
+    return { created: true, ticket: values.Request_ID, request: projectRequest_(values) };
+  } finally { lock.releaseLock(); }
+}
+
+function ensureInboxSheets_() {
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  [SHEETS.INBOX, SHEETS.INBOX_READ].forEach(function (name) {
+    if (spreadsheet.getSheetByName(name)) return;
+    const sheet = spreadsheet.insertSheet(name), headers = HEADERS[name];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.setFrozenRows(1);
+    requestTables_[name] = null;
+  });
+}
+
+function inboxSession_(token) { return requireRole_(token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]); }
+function isInboxAdmin_(session) { return session.role === ROLES.CSP_ADMIN || session.role === ROLES.SUPER; }
+function visibleInboxMessage_(session, row) {
+  if (!isTrue_(row.Active)) return false;
+  if (isInboxAdmin_(session)) return true;
+  return cleanString_(row.Recipient_Type, 30) === "ALL_CSP" || cleanString_(row.Recipient_User_ID, 100) === session.userId || cleanString_(row.Sender_User_ID, 100) === session.userId;
+}
+function projectInboxMessage_(row) {
+  return selectFields_(row, ["Message_ID", "Thread_ID", "Parent_Message_ID", "Message_Type", "Subject", "Message", "Sender_User_ID", "Sender_Name", "Sender_Role", "Recipient_Type", "Recipient_User_ID", "Recipient_Name", "Priority", "Created_At"]);
+}
+
+function inboxList_(input) {
+  const session = inboxSession_(input.token); ensureInboxSheets_();
+  const rows = readRows_(SHEETS.INBOX).filter(function (row) { return visibleInboxMessage_(session, row); });
+  const read = {};
+  readRows_(SHEETS.INBOX_READ).forEach(function (row) { if (cleanString_(row.User_ID, 100) === session.userId) read[cleanString_(row.Message_ID, 100)] = true; });
+  const threads = {};
+  rows.forEach(function (row) {
+    const threadId = cleanString_(row.Thread_ID, 100), current = threads[threadId];
+    if (!current) threads[threadId] = { latest: row, unread: false };
+    else if (dateMs_(row.Created_At) > dateMs_(current.latest.Created_At)) current.latest = row;
+    if (cleanString_(row.Sender_User_ID, 100) !== session.userId && !read[cleanString_(row.Message_ID, 100)]) threads[threadId].unread = true;
+  });
+  const output = Object.keys(threads).map(function (id) {
+    const item = projectInboxMessage_(threads[id].latest); item.unread = threads[id].unread; return item;
+  }).sort(function (a,b) { return dateMs_(b.Created_At)-dateMs_(a.Created_At); }).slice(0, 100);
+  return { threads: output, unreadCount: output.filter(function(item){return item.unread;}).length };
+}
+
+function inboxThread_(input) {
+  const session = inboxSession_(input.token); ensureInboxSheets_();
+  const threadId = cleanString_(input.threadId, 100);
+  const all = readRows_(SHEETS.INBOX).filter(function (row) { return cleanString_(row.Thread_ID, 100) === threadId && isTrue_(row.Active); });
+  if (!all.some(function (row) { return visibleInboxMessage_(session, row); })) throw new ApiError_("Conversation not found.", "NOT_FOUND");
+  return { messages: all.filter(function(row){return visibleInboxMessage_(session,row);}).sort(function(a,b){return dateMs_(a.Created_At)-dateMs_(b.Created_At);}).map(projectInboxMessage_) };
+}
+
+function inboxRecipients_(input) {
+  const session = inboxSession_(input.token);
+  if (!isInboxAdmin_(session)) return { users: [] };
+  const users = readRows_(SHEETS.USERS).filter(function(user){return cleanString_(user.Role,50)===ROLES.CSP&&cleanString_(user.Status,30)==="Active";}).map(function(user){return {userId:cleanString_(user.User_ID,100),name:cleanString_(user.Name,150)};});
+  return { users: users };
+}
+
+function nextMessageId_(rows) {
+  let maximum=0; rows.forEach(function(row){const match=cleanString_(row.Message_ID,100).match(/^MSG(\d+)$/);if(match)maximum=Math.max(maximum,Number(match[1]));});
+  return "MSG"+String(maximum+1).padStart(6,"0");
+}
+
+function inboxSend_(input) {
+  const session = inboxSession_(input.token); ensureInboxSheets_();
+  const subject=cleanString_(input.subject,180), message=cleanString_(input.message,5000), priority=cleanString_(input.priority||"Normal",20);
+  if(!subject||!message)throw new ApiError_("Subject and message are required.","VALIDATION_ERROR");
+  if(["Normal","Important"].indexOf(priority)===-1)throw new ApiError_("Invalid priority.","VALIDATION_ERROR");
+  let recipientType="SUPERVISORS",recipientUserId="",recipientName="",messageType="SUPERVISOR_MESSAGE";
+  if(isInboxAdmin_(session)){
+    messageType="ANNOUNCEMENT";recipientType=cleanString_(input.recipientType,30);
+    if(recipientType==="ALL_CSP")recipientName="All CSP";
+    else if(recipientType==="INDIVIDUAL_CSP"){
+      recipientUserId=cleanString_(input.recipientUserId,100);
+      const user=readRows_(SHEETS.USERS).find(function(row){return cleanString_(row.User_ID,100)===recipientUserId&&cleanString_(row.Role,50)===ROLES.CSP&&cleanString_(row.Status,30)==="Active";});
+      if(!user)throw new ApiError_("Select an active CSP staff recipient.","VALIDATION_ERROR");recipientName=cleanString_(user.Name,150);
+    }else throw new ApiError_("Select a valid CSP audience.","VALIDATION_ERROR");
+  }
+  const lock=LockService.getScriptLock();lock.waitLock(30000);
+  try{const table=getTable_(SHEETS.INBOX),id=nextMessageId_(table.rows),now=new Date(),row={Message_ID:id,Thread_ID:id,Parent_Message_ID:"",Message_Type:messageType,Subject:subject,Message:message,Sender_User_ID:session.userId,Sender_Name:session.name,Sender_Role:session.role,Recipient_Type:recipientType,Recipient_User_ID:recipientUserId,Recipient_Name:recipientName,Priority:priority,Created_At:now,Active:true};appendObjectRow_(table,row);return {message:projectInboxMessage_(row)};}finally{lock.releaseLock();}
+}
+
+function inboxReply_(input) {
+  const session=inboxSession_(input.token);ensureInboxSheets_();const threadId=cleanString_(input.threadId,100),message=cleanString_(input.message,5000);
+  if(!message)throw new ApiError_("A reply is required.","VALIDATION_ERROR");
+  const rows=readRows_(SHEETS.INBOX).filter(function(row){return cleanString_(row.Thread_ID,100)===threadId&&isTrue_(row.Active);});
+  if(!rows.some(function(row){return visibleInboxMessage_(session,row);}))throw new ApiError_("Conversation not found.","NOT_FOUND");
+  const root=rows[0],staffSender=rows.find(function(row){return cleanString_(row.Sender_Role,50)===ROLES.CSP;});
+  let recipientType="SUPERVISORS",recipientUserId="",recipientName="Supervisors";
+  if(isInboxAdmin_(session)&&staffSender){recipientType="INDIVIDUAL_CSP";recipientUserId=cleanString_(staffSender.Sender_User_ID,100);recipientName=cleanString_(staffSender.Sender_Name,150);}
+  const lock=LockService.getScriptLock();lock.waitLock(30000);
+  try{requestTables_[SHEETS.INBOX]=null;const table=getTable_(SHEETS.INBOX),id=nextMessageId_(table.rows),row={Message_ID:id,Thread_ID:threadId,Parent_Message_ID:cleanString_(rows[rows.length-1].Message_ID,100),Message_Type:"REPLY",Subject:cleanString_(root.Subject,180),Message:message,Sender_User_ID:session.userId,Sender_Name:session.name,Sender_Role:session.role,Recipient_Type:recipientType,Recipient_User_ID:recipientUserId,Recipient_Name:recipientName,Priority:cleanString_(root.Priority,20)||"Normal",Created_At:new Date(),Active:true};appendObjectRow_(table,row);return {message:projectInboxMessage_(row)};}finally{lock.releaseLock();}
+}
+
+function inboxMarkRead_(input) {
+  const session=inboxSession_(input.token);ensureInboxSheets_();const thread=inboxThread_(input).messages,table=getTable_(SHEETS.INBOX_READ),known={};
+  table.rows.forEach(function(row){if(cleanString_(row.User_ID,100)===session.userId)known[cleanString_(row.Message_ID,100)]=true;});
+  thread.forEach(function(message){if(message.Sender_User_ID!==session.userId&&!known[message.Message_ID])appendObjectRow_(table,{Message_ID:message.Message_ID,User_ID:session.userId,Read_At:new Date()});});
+  return { marked: true };
 }
 
 function takeRequest_(input) {

@@ -49,6 +49,9 @@
         <button class="nav-item" data-view="team-requests" data-roles="BDT_STAFF SUPER_ADMIN"><span>▤</span> Team Requests</button>
         <p class="nav-label" data-roles="CSP_STAFF CSP_ADMIN SUPER_ADMIN">CSP workspace</p>
         <button class="nav-item" data-view="csp-queue" data-roles="CSP_STAFF CSP_ADMIN SUPER_ADMIN"><span>◎</span> CSP Queue <b class="nav-count" id="queue-count">3</b></button>
+        <button class="nav-item" data-view="inbox" data-roles="CSP_STAFF CSP_ADMIN SUPER_ADMIN"><span>✉</span> Inbox <b class="nav-count" id="inbox-count" hidden>0</b></button>
+        <button class="nav-item" data-view="ticket-search" data-roles="CSP_STAFF CSP_ADMIN SUPER_ADMIN"><span>⌕</span> Ticket Search</button>
+        <button class="nav-item" data-view="new-csp-case" data-roles="CSP_STAFF CSP_ADMIN SUPER_ADMIN"><span>＋</span> New CSP Case</button>
         <button class="nav-item" data-view="reports" data-roles="CSP_ADMIN SUPER_ADMIN"><span>▥</span> Reports</button>
         <p class="nav-label" data-roles="SUPER_ADMIN">Admin</p>
         <button class="nav-item" data-view="user-management" data-roles="SUPER_ADMIN"><span>♙</span> User Management</button>
@@ -63,7 +66,7 @@
       <header class="topbar">
         <button class="menu-button" id="menu-button" aria-label="Open navigation" aria-expanded="false">☰</button>
         <div><p class="eyebrow">BDT × CSP Service Desk</p><h1 id="page-title">Dashboard</h1></div>
-        <div class="topbar-actions"><div class="avatar small" id="topbar-avatar">—</div></div>
+        <div class="topbar-actions"><button class="secondary-button topbar-search" data-go="ticket-search" data-roles="CSP_STAFF CSP_ADMIN SUPER_ADMIN">⌕ Search Tickets</button><div class="avatar small" id="topbar-avatar">—</div></div>
       </header>
 
       <main class="workspace">
@@ -107,6 +110,22 @@
           <div class="stats-grid compact" id="queue-stats"></div>
           <div class="queue-toolbar"><div class="status-tabs" id="queue-status-tabs" role="group" aria-label="Queue status"><button class="active" data-queue-status="Active">Active</button><button data-queue-status="Pending">Pending</button><button data-queue-status="Processing">Processing</button><button data-queue-status="Completed">Completed</button><button data-queue-status="Unable">Unable</button><button data-queue-status="All">All</button></div><div class="search-field"><span>⌕</span><input id="queue-search" type="search" placeholder="Search queue" aria-label="Search queue"></div></div>
           <div class="panel"><div class="panel-header"><div><h2>Active Queue</h2><p>Requests are ordered by age, oldest first.</p></div><span class="live-indicator"><i></i> Active queue</span></div><div class="table-wrap"><table><thead><tr><th>Age</th><th>Ticket</th><th>Brand</th><th>Request</th><th>Player / Details</th><th>Requested By</th><th>Status</th><th>Handler</th><th>Action</th></tr></thead><tbody id="queue-table"></tbody></table><div class="empty-state" id="queue-empty" hidden><span>✓</span><h3>Queue is clear</h3><p>There are no active requests right now.</p></div></div></div>
+        </section>
+
+        <section class="view" id="inbox-view" data-title="Inbox">
+          <div class="page-intro"><div><h2>CSP Inbox</h2><p>Operational announcements, instructions, and supervisor clarifications.</p></div><button class="primary-button" id="new-inbox-message">＋ New Message</button></div>
+          <div class="inbox-layout"><div class="panel inbox-list"><div class="panel-header"><div><h2>Conversations</h2><p id="inbox-summary">Loading inbox…</p></div><button class="text-button" id="refresh-inbox">Refresh</button></div><div id="inbox-threads"></div></div><div class="panel inbox-conversation" id="inbox-conversation"><div class="empty-state"><span>✉</span><h3>Select a conversation</h3><p>Announcements and replies will appear here.</p></div></div></div>
+        </section>
+
+        <section class="view" id="ticket-search-view" data-title="Ticket Search">
+          <div class="page-intro"><div><h2>Search Tickets</h2><p>Find historical requests by ticket ID, player username, or affiliate username.</p></div></div>
+          <form class="panel lookup-form" id="ticket-search-form"><div class="search-field"><span>⌕</span><input id="ticket-search-query" type="search" placeholder="REQ-100001 or username" minlength="2" required></div><button class="primary-button" type="submit">Search</button></form>
+          <div class="panel"><div class="panel-header"><div><h2>Search Results</h2><p id="ticket-search-summary">Enter a ticket ID or at least 2 username characters.</p></div></div><div class="table-wrap"><table><thead><tr><th>Ticket</th><th>Brand</th><th>Request Type</th><th>Player / Affiliate</th><th>Status</th><th>Requested By</th><th>Handler</th><th>Submitted</th><th>Action</th></tr></thead><tbody id="ticket-search-results"></tbody></table><div class="empty-state" id="ticket-search-empty" hidden><span>⌕</span><h3>No tickets found</h3><p>Check the ticket ID or username and search again.</p></div></div></div>
+        </section>
+
+        <section class="view" id="new-csp-case-view" data-title="New CSP Case">
+          <div class="page-intro"><div><h2>Create a CSP case</h2><p>Track one of the approved internal CSP operational cases.</p></div></div>
+          <form class="panel request-form csp-case-form" id="csp-case-form"><div class="form-section-title"><span>1</span><div><h3>Case information</h3><p>The case is assigned to you and starts in Processing.</p></div></div><div class="form-grid two"><div class="field"><label for="csp-case-brand">Brand <em>*</em></label><select id="csp-case-brand" required><option value="">Select brand</option></select></div><div class="field"><label for="csp-case-type">Case Type <em>*</em></label><select id="csp-case-type" required><option value="">Select case type</option><option>Customer Available for Call</option><option>Wrong Currency Signup</option><option>High Balance Unlock / Verify</option></select></div></div><div id="csp-case-fields" class="dynamic-fields"><div class="form-placeholder"><span>↖</span><p>Select a case type to see the required details.</p></div></div><div class="form-actions"><p>Only approved CSP case types can be submitted.</p><button class="primary-button" type="submit">Create CSP Case</button></div></form>
         </section>
 
         <section class="view" id="reports-view" data-title="Reports">
@@ -162,6 +181,7 @@
   </div>
   <div class="modal-backdrop" id="duplicate-modal" hidden><section class="modal small-modal" role="dialog" aria-modal="true" aria-labelledby="duplicate-title"><button class="modal-close" data-close-modal aria-label="Close">×</button><div class="modal-heading"><span class="modal-icon danger">!</span><div><p class="eyebrow">Duplicate check</p><h2 id="duplicate-title">Similar active request found</h2></div></div><p>Review the similar request before submitting another.</p><div class="duplicate-list" id="duplicate-list"></div><div class="modal-actions"><button class="secondary-button" type="button" data-close-modal>Cancel</button><button class="primary-button" id="submit-duplicate-button" type="button">Submit Anyway</button></div></section></div>
   <div class="modal-backdrop" id="request-confirm-modal" hidden><section class="modal small-modal" role="dialog" aria-modal="true" aria-labelledby="request-confirm-title"><button class="modal-close" data-close-modal aria-label="Close">×</button><div class="modal-heading"><span class="modal-icon" id="request-confirm-icon">✓</span><div><p class="eyebrow">Confirm action</p><h2 id="request-confirm-title">Confirm request update</h2></div></div><p id="request-confirm-copy"></p><div class="modal-actions"><button class="secondary-button" type="button" data-close-modal>Cancel</button><button class="primary-button" id="request-confirm-button" type="button">Confirm</button></div></section></div>
+  <div class="modal-backdrop" id="inbox-compose-modal" hidden><section class="modal admin-modal" role="dialog" aria-modal="true" aria-labelledby="inbox-compose-title"><button class="modal-close" data-close-modal aria-label="Close">×</button><div class="modal-heading"><span class="modal-icon">✉</span><div><p class="eyebrow">CSP Inbox</p><h2 id="inbox-compose-title">New Message</h2></div></div><form id="inbox-compose-form"><div class="field inbox-admin-field"><label for="inbox-audience">Audience <em>*</em></label><select id="inbox-audience"><option value="ALL_CSP">All CSP</option><option value="INDIVIDUAL_CSP">Individual CSP Staff</option></select></div><div class="field inbox-admin-field" id="inbox-recipient-field" hidden><label for="inbox-recipient">CSP Staff <em>*</em></label><select id="inbox-recipient"><option value="">Select staff member</option></select></div><div class="field inbox-admin-field"><label for="inbox-priority">Priority</label><select id="inbox-priority"><option>Normal</option><option>Important</option></select></div><div class="field"><label for="inbox-subject">Subject <em>*</em></label><input id="inbox-subject" required maxlength="180"></div><div class="field"><label for="inbox-message">Message <em>*</em></label><textarea id="inbox-message" rows="6" required maxlength="5000"></textarea></div><div class="modal-actions"><button class="secondary-button" type="button" data-close-modal>Cancel</button><button class="primary-button" type="submit">Send</button></div></form></section></div>
   <script src="app.js"></script>
 </body>
 </html>
