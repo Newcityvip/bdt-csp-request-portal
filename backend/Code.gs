@@ -119,6 +119,7 @@ function handleApi_(e, method) {
       teamRequests: function () { return success_(teamRequests_(input)); },
       cspQueue: function () { return success_(cspQueue_(input)); },
       bdtQueue: function () { return success_(bdtQueue_(input)); },
+      cspRequests: function () { return success_(cspRequests_(input)); },
       takeRequest: function () { return success_(takeRequest_(input)); },
       completeRequest: function () { return success_(completeRequest_(input)); },
       unableRequest: function () { return success_(unableRequest_(input)); },
@@ -351,6 +352,24 @@ function bdtQueue_(input) {
   return { requests: queue, count: queue.length };
 }
 
+function cspRequests_(input) {
+  const session = requireRole_(input.token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]);
+  const history = readRows_(SHEETS.HISTORY);
+  const cspCaseIds = cspCaseRequestIds_(history);
+  const resolutionRemarks = resolutionRemarksByRequest_(history);
+  const visibleRows = readRows_(SHEETS.REQUESTS)
+    .filter(function (row) { return cspCaseIds[cleanString_(row.Request_ID, 100)] === true; })
+    .filter(function (row) { return session.role !== ROLES.CSP || cleanString_(row.Requested_By_ID, 100) === session.userId; });
+  const requests = filterRequestRows_(visibleRows, mergeObjects_(input, { status: "" }))
+    .map(function (row) {
+      const request = projectListRequest_(row);
+      request.Processing_Team = "BDT";
+      request.Resolution_Remark = resolutionRemarks[cleanString_(row.Request_ID, 100)] || "";
+      return request;
+    });
+  return { requests: requests, count: requests.length };
+}
+
 function reports_(input) {
   requireRole_(input.token, [ROLES.CSP_ADMIN, ROLES.SUPER]);
   const from = cleanString_(input.fromDate, 20), to = cleanString_(input.toDate, 20);
@@ -547,7 +566,8 @@ function takeRequest_(input) {
 function completeRequest_(input) {
   const session = requireSession_(input.token);
   const requestId = requireRequestId_(input.requestId);
-  return finalizeRequest_(requestId, session, "Completed", "", "Completed");
+  const remark = cleanString_(input.remark, 1000);
+  return finalizeRequest_(requestId, session, "Completed", "", "Completed", remark);
 }
 
 function unableRequest_(input) {
@@ -555,14 +575,15 @@ function unableRequest_(input) {
   const requestId = requireRequestId_(input.requestId);
   const reason = cleanString_(input.reason, 1000);
   if (!reason) throw new ApiError_("An unable reason is required.", "VALIDATION_ERROR");
-  return finalizeRequest_(requestId, session, "Unable", reason, "Unable");
+  const remark = cleanString_(input.remark, 1000);
+  return finalizeRequest_(requestId, session, "Unable", reason, "Unable", remark);
 }
 
-function finalizeRequest_(requestId, session, newStatus, reason, action) {
+function finalizeRequest_(requestId, session, newStatus, reason, action, remark) {
   return withRequestLock_(requestId, function (table, request) {
-    requireHandlerRole_(session, request);
+    const cspCase = requireHandlerRole_(session, request);
     if (request.Status !== "Processing") throw new ApiError_("Only a processing request can be updated.", "REQUEST_CONFLICT", { status: request.Status });
-    if ((isCspCaseRequest_(request) || session.role === ROLES.CSP) && cleanString_(request.Taken_By_ID, 100) !== session.userId) {
+    if ((cspCase || session.role === ROLES.CSP) && cleanString_(request.Taken_By_ID, 100) !== session.userId) {
       throw new ApiError_("This request is being handled by another user.", "FORBIDDEN");
     }
     const now = new Date();
@@ -574,7 +595,7 @@ function finalizeRequest_(requestId, session, newStatus, reason, action) {
     };
     if (newStatus === "Unable") updates.Unable_Reason = reason;
     updateObjectRow_(table, request._row, updates);
-    appendHistory_(requestId, action, "Processing", newStatus, session, reason);
+    appendHistory_(requestId, action, "Processing", newStatus, session, cspCase ? resolutionHistoryDetails_(reason, remark) : reason);
     return { request: projectHandledRequest_(mergeObjects_(request, updates)) };
   });
 }
@@ -607,7 +628,9 @@ function requestDetails_(input) {
     .map(function (row) {
       return selectFields_(row, ["History_ID", "Request_ID", "Action", "Old_Status", "New_Status", "Performed_By_ID", "Performed_By_Name", "Performed_By_Team", "Details", "Created_At"]);
     });
-  return { request: projectHandledRequest_(request), history: history };
+  const projected = projectHandledRequest_(request);
+  if (projected.Processing_Team === "BDT") projected.Resolution_Remark = resolutionRemarkFromHistory_(history);
+  return { request: projected, history: history };
 }
 
 function dashboard_(input) {
@@ -1165,12 +1188,41 @@ function authorizeRequestView_(session, request) {
   throw new ApiError_("You are not authorized to view this request.", "FORBIDDEN");
 }
 
-function cspCaseRequestIds_() {
+function cspCaseRequestIds_(history) {
   const ids = {};
-  readRows_(SHEETS.HISTORY).forEach(function (row) {
+  (history || readRows_(SHEETS.HISTORY)).forEach(function (row) {
     if (cleanString_(row.Action, 100) === "CSP Case Created") ids[cleanString_(row.Request_ID, 100)] = true;
   });
   return ids;
+}
+
+function resolutionHistoryDetails_(reason, remark) {
+  const context = cleanString_(remark, 1000);
+  const unableReason = cleanString_(reason, 1000);
+  return unableReason ? unableReason + (context ? "\nResolution Remark: " + context : "") : context;
+}
+
+function resolutionRemarkFromHistory_(history) {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const row = history[index], action = cleanString_(row.Action, 100), details = cleanString_(row.Details, 2000);
+    if (action === "Completed") return details;
+    if (action === "Unable") {
+      const marker = "Resolution Remark: ", position = details.indexOf(marker);
+      return position === -1 ? "" : details.slice(position + marker.length);
+    }
+  }
+  return "";
+}
+
+function resolutionRemarksByRequest_(history) {
+  const grouped = {};
+  (history || readRows_(SHEETS.HISTORY)).forEach(function (row) {
+    const action = cleanString_(row.Action, 100);
+    if (action === "Completed" || action === "Unable") grouped[cleanString_(row.Request_ID, 100)] = row;
+  });
+  const remarks = {};
+  Object.keys(grouped).forEach(function (requestId) { remarks[requestId] = resolutionRemarkFromHistory_([grouped[requestId]]); });
+  return remarks;
 }
 
 function isCspCaseRequest_(request) {
@@ -1180,8 +1232,10 @@ function isCspCaseRequest_(request) {
 }
 
 function requireHandlerRole_(session, request) {
-  const roles = isCspCaseRequest_(request) ? [ROLES.BDT] : [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER];
+  const cspCase = isCspCaseRequest_(request);
+  const roles = cspCase ? [ROLES.BDT] : [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER];
   if (roles.indexOf(session.role) === -1) throw new ApiError_("You are not authorized for this action.", "FORBIDDEN");
+  return cspCase;
 }
 
 function projectHandledRequest_(row) {
