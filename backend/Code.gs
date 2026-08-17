@@ -41,7 +41,20 @@ const CSP_CASE_TYPES = {
   "Customer Available for Call": true,
   "Wrong Currency Signup": true,
   "High Balance Unlock / Verify": true,
+  "High Balance Unlock": true,
+  "MAC Signup": true,
+  "Affiliate Change Full Name & DOB": true,
 };
+
+const CSP_CREATABLE_CASE_TYPES = {
+  "Wrong Currency Signup": true,
+  "High Balance Unlock": true,
+  "MAC Signup": true,
+  "Affiliate Change Full Name & DOB": true,
+};
+const ATTACHMENT_HEADER = "Attachment_File_ID";
+const ATTACHMENT_FOLDER_PROPERTY = "OPS_REQUEST_ATTACHMENT_FOLDER_ID";
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 
 const SESSION_SECONDS = 8 * 60 * 60;
 const SESSION_CACHE_SECONDS = 6 * 60 * 60;
@@ -125,6 +138,7 @@ function handleApi_(e, method) {
       unableRequest: function () { return success_(unableRequest_(input)); },
       cancelRequest: function () { return success_(cancelRequest_(input)); },
       requestDetails: function () { return success_(requestDetails_(input)); },
+      requestAttachment: function () { return success_(requestAttachment_(input)); },
       dashboard: function () { return success_(dashboard_(input)); },
       listUsers: function () { return success_(listUsers_(input)); },
       createUser: function () { return success_(createUser_(input)); },
@@ -200,7 +214,7 @@ function requestTypes_() {
 function requestTypeFilters_(input) {
   requireSession_(input.token);
   const names = readRows_(SHEETS.TYPES).slice().sort(sortByNumber_("Sort_Order")).map(function(row){return cleanString_(row.Request_Type,150);}).filter(Boolean);
-  ["Customer Available for Call", "Wrong Currency Signup", "High Balance Unlock / Verify"].forEach(function(name){if(names.indexOf(name)===-1)names.push(name);});
+  ["Customer Available for Call", "Wrong Currency Signup", "High Balance Unlock / Verify", "High Balance Unlock", "MAC Signup", "Affiliate Change Full Name & DOB"].forEach(function(name){if(names.indexOf(name)===-1)names.push(name);});
   return { requestTypes: names };
 }
 
@@ -401,7 +415,7 @@ function createCspCase_(input) {
   const session = requireRole_(input.token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]);
   const requestType = cleanString_(input.requestType, 150);
   const brand = cleanString_(input.brand, 50);
-  if (!CSP_CASE_TYPES[requestType]) throw new ApiError_("The selected CSP case type is not available.", "INVALID_REQUEST_TYPE");
+  if (!CSP_CREATABLE_CASE_TYPES[requestType]) throw new ApiError_("The selected CSP case type is not available.", "INVALID_REQUEST_TYPE");
   const brandRow = readRows_(SHEETS.BRANDS).find(function (row) { return isTrue_(row.Active) && cleanString_(row.Brand_Code, 50) === brand; });
   if (!brandRow) throw new ApiError_("The selected brand is not available.", "INVALID_BRAND");
 
@@ -411,35 +425,101 @@ function createCspCase_(input) {
   const player = cleanString_(input.playerUsername, fieldLimit_("Player_Username"));
   const affiliate = cleanString_(input.affiliateUsername, fieldLimit_("Affiliate_Username"));
   const notes = cleanString_(input.notes, fieldLimit_("Notes"));
-  if (requestType === "Customer Available for Call") {
-    const subjectType = cleanString_(input.subjectType, 20);
-    if (subjectType === "Player" && player) values.Player_Username = player;
-    else if (subjectType === "Affiliate" && affiliate) values.Affiliate_Username = affiliate;
-    else throw new ApiError_("Select a subject type and enter the matching username.", "VALIDATION_ERROR");
-    values.Notes = notes;
-  } else if (requestType === "Wrong Currency Signup") {
+  const attachment = validateAttachment_(input.attachment);
+  if (attachment && requestType !== "Affiliate Change Full Name & DOB") throw new ApiError_("Attachments are not available for this case type.", "VALIDATION_ERROR");
+  if (requestType === "Wrong Currency Signup") {
     const currentCurrency = cleanString_(input.currentCurrency, 30), correctCurrency = cleanString_(input.correctCurrency, 30);
     if (!affiliate || !currentCurrency || !correctCurrency) throw new ApiError_("Affiliate username and both currencies are required.", "VALIDATION_ERROR");
     values.Affiliate_Username = affiliate;
     values.Notes = "Current Currency: " + currentCurrency + "\nCorrect Currency: " + correctCurrency + (notes ? "\n\n" + notes : "");
-  } else {
+  } else if (requestType === "High Balance Unlock") {
     if (!player) throw new ApiError_("Player username is required.", "VALIDATION_ERROR");
     values.Player_Username = player;
     values.Notes = notes;
+  } else if (requestType === "MAC Signup") {
+    if (!affiliate) throw new ApiError_("Affiliate username is required.", "VALIDATION_ERROR");
+    values.Affiliate_Username = affiliate;
+    values.Notes = structuredNotes_([
+      ["Account 1 Email", input.account1Email], ["Account 1 Phone Number", input.account1Phone],
+      ["Account 2 Email", input.account2Email], ["Account 2 Phone Number", input.account2Phone]
+    ], notes);
+  } else {
+    const currentName = cleanString_(input.currentFullName, fieldLimit_("Current_Name"));
+    const newName = cleanString_(input.newFullName, fieldLimit_("New_Full_Name"));
+    const currentDob = validDateInput_(input.currentDob), newDob = validDateInput_(input.newDob);
+    if (!affiliate || !currentName || !newName || !currentDob || !newDob) throw new ApiError_("Affiliate username, both full names, and both dates of birth are required.", "VALIDATION_ERROR");
+    values.Affiliate_Username = affiliate;
+    values.Current_Name = currentName;
+    values.New_Full_Name = newName;
+    values.Notes = structuredNotes_([["Current DOB", currentDob], ["New DOB", newDob]], notes);
   }
 
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
+  let uploadedFile = null, requestCreated = false;
   try {
     const table = getTable_(SHEETS.REQUESTS), now = new Date();
+    if (attachment) {
+      if (!table.index[ATTACHMENT_HEADER]) throw new ApiError_("Attachment storage is not configured. Contact an administrator.", "ATTACHMENT_CONFIGURATION_ERROR");
+      const folder = attachmentFolder_();
+      uploadedFile = folder.createFile(Utilities.newBlob(attachment.bytes, attachment.mimeType, attachment.fileName));
+      values[ATTACHMENT_HEADER] = uploadedFile.getId();
+    }
     values.Request_ID = nextRequestId_(table.rows);
     values.Status = "Pending";
     values.Requested_By_ID = session.userId; values.Requested_By_Name = session.name; values.Requested_At = now;
     values.Last_Updated_At = now;
     appendObjectRow_(table, values);
+    requestCreated = true;
     appendHistory_(values.Request_ID, "CSP Case Created", "", "Pending", session, requestType);
-    return { created: true, ticket: values.Request_ID, request: projectBdtRequest_(values) };
+    const projected = projectBdtRequest_(values);
+    if (uploadedFile) projected.Has_Attachment = true;
+    return { created: true, ticket: values.Request_ID, request: projected };
+  } catch (error) {
+    if (uploadedFile && !requestCreated) { try { uploadedFile.setTrashed(true); } catch (cleanupError) {} }
+    throw error;
   } finally { lock.releaseLock(); }
+}
+
+function structuredNotes_(fields, notes) {
+  const lines = fields.map(function (item) {
+    const value = cleanString_(item[1], 500);
+    return value ? item[0] + ": " + value : "";
+  }).filter(Boolean);
+  const context = cleanString_(notes, fieldLimit_("Notes"));
+  return lines.join("\n") + (context ? (lines.length ? "\n\n" : "") + context : "");
+}
+
+function validDateInput_(value) {
+  const date = cleanString_(value, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return "";
+  const parsed = new Date(date + "T00:00:00Z");
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date ? date : "";
+}
+
+function validateAttachment_(input) {
+  if (input === undefined || input === null || input === "") return null;
+  if (!input || typeof input !== "object") throw new ApiError_("The attachment is invalid.", "INVALID_ATTACHMENT");
+  const originalName = cleanString_(input.fileName, 180).replace(/\\/g, "/").split("/").pop();
+  const mimeType = cleanString_(input.mimeType, 100).toLowerCase();
+  const base64 = typeof input.base64 === "string" ? input.base64 : "";
+  const match = originalName.match(/\.([A-Za-z0-9]+)$/), extension = match ? match[1].toLowerCase() : "";
+  const allowed = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
+  if (!allowed[extension] || allowed[extension] !== mimeType) throw new ApiError_("Attachment must be a JPG, JPEG, PNG, or WEBP image.", "INVALID_ATTACHMENT_TYPE");
+  if (!base64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) throw new ApiError_("The attachment is invalid.", "INVALID_ATTACHMENT");
+  if (Math.floor(base64.length * 3 / 4) > MAX_ATTACHMENT_BYTES + 2) throw new ApiError_("Attachment must be 5 MB or smaller.", "ATTACHMENT_TOO_LARGE");
+  let bytes;
+  try { bytes = Utilities.base64Decode(base64); } catch (error) { throw new ApiError_("The attachment is invalid.", "INVALID_ATTACHMENT"); }
+  if (bytes.length > MAX_ATTACHMENT_BYTES) throw new ApiError_("Attachment must be 5 MB or smaller.", "ATTACHMENT_TOO_LARGE");
+  const safeBase = originalName.slice(0, -(extension.length + 1)).replace(/[^A-Za-z0-9._ -]/g, "_").trim().slice(0, 120) || "attachment";
+  return { fileName: safeBase + "." + extension, mimeType: mimeType, bytes: bytes };
+}
+
+function attachmentFolder_() {
+  const folderId = cleanString_(PropertiesService.getScriptProperties().getProperty(ATTACHMENT_FOLDER_PROPERTY), 300);
+  if (!folderId) throw new ApiError_("Attachment storage is not configured. Contact an administrator.", "ATTACHMENT_CONFIGURATION_ERROR");
+  try { return DriveApp.getFolderById(folderId); }
+  catch (error) { throw new ApiError_("Attachment storage is unavailable. Contact an administrator.", "ATTACHMENT_CONFIGURATION_ERROR"); }
 }
 
 function ensureInboxSheets_() {
@@ -630,7 +710,23 @@ function requestDetails_(input) {
     });
   const projected = projectHandledRequest_(request);
   if (projected.Processing_Team === "BDT") projected.Resolution_Remark = resolutionRemarkFromHistory_(history);
+  if (cleanString_(request[ATTACHMENT_HEADER], 300)) projected.Has_Attachment = true;
   return { request: projected, history: history };
+}
+
+function requestAttachment_(input) {
+  const session = requireSession_(input.token);
+  const request = findRequest_(requireRequestId_(input.requestId));
+  authorizeRequestView_(session, request);
+  if (session.role === ROLES.CSP && cleanString_(request.Requested_By_ID, 100) !== session.userId) throw new ApiError_("You are not authorized to view this attachment.", "FORBIDDEN");
+  const fileId = cleanString_(request[ATTACHMENT_HEADER], 300);
+  if (!fileId) throw new ApiError_("This request has no attachment.", "NOT_FOUND");
+  let file, blob;
+  try { file = DriveApp.getFileById(fileId); blob = file.getBlob(); }
+  catch (error) { throw new ApiError_("The attachment is unavailable.", "NOT_FOUND"); }
+  const mimeType = cleanString_(blob.getContentType(), 100).toLowerCase();
+  if (["image/jpeg", "image/png", "image/webp"].indexOf(mimeType) === -1) throw new ApiError_("The attachment is unavailable.", "INVALID_ATTACHMENT_TYPE");
+  return { fileName: cleanString_(file.getName(), 180), mimeType: mimeType, base64: Utilities.base64Encode(blob.getBytes()) };
 }
 
 function dashboard_(input) {
