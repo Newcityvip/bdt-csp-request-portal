@@ -20,7 +20,7 @@ const SHEETS = {
 
 const HEADERS = {
   Users: ["User_ID", "Name", "Username", "Password_Hash", "Team", "Role", "Status", "Created_At", "Updated_At", "Last_Login"],
-  Requests: ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Status", "Requested_By_ID", "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Completed_By_ID", "Completed_By_Name", "Completed_At", "Unable_Reason", "Cancelled_By_ID", "Cancelled_At", "Waiting_Seconds", "Handling_Seconds", "Total_Seconds", "Last_Updated_At"],
+  Requests: ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Status", "Requested_By_ID", "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Completed_By_ID", "Completed_By_Name", "Completed_At", "Unable_Reason", "Cancelled_By_ID", "Cancelled_At", "Waiting_Seconds", "Handling_Seconds", "Total_Seconds", "Last_Updated_At", "Affiliate_Username_2"],
   Request_History: ["History_ID", "Request_ID", "Action", "Old_Status", "New_Status", "Performed_By_ID", "Performed_By_Name", "Performed_By_Team", "Details", "Created_At"],
   Request_Types: ["Type_ID", "Request_Type", "Required_Fields", "Optional_Fields", "Active", "Sort_Order"],
   Brands: ["Brand_ID", "Brand_Code", "Brand_Name", "Active", "Sort_Order"],
@@ -86,7 +86,7 @@ const REQUEST_INPUTS = {
 };
 
 const SAFE_REQUEST_FIELDS = [
-  "Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username",
+  "Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2",
   "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name",
   "New_Full_Name", "Current_Player_Username", "New_Player_Username",
   "Transaction_ID", "Amount", "Notes", "Status", "Requested_By_ID",
@@ -406,7 +406,7 @@ function searchTickets_(input) {
   const exactTicket = query.indexOf("req-") === 0;
   const matches = readRows_(SHEETS.REQUESTS).filter(function (row) {
     if (exactTicket) return cleanString_(row.Request_ID, 100).toLowerCase() === query;
-    return cleanString_(row.Player_Username, 150).toLowerCase().indexOf(query) !== -1 || cleanString_(row.Affiliate_Username, 150).toLowerCase().indexOf(query) !== -1;
+    return cleanString_(row.Player_Username, 150).toLowerCase().indexOf(query) !== -1 || cleanString_(row.Affiliate_Username, 150).toLowerCase().indexOf(query) !== -1 || cleanString_(row.Affiliate_Username_2, 150).toLowerCase().indexOf(query) !== -1;
   }).sort(newestFirst_).slice(0, 50).map(projectRequest_);
   return { requests: matches, count: matches.length, limit: 50 };
 }
@@ -437,8 +437,10 @@ function createCspCase_(input) {
     values.Player_Username = player;
     values.Notes = notes;
   } else if (requestType === "MAC Signup") {
-    if (!affiliate) throw new ApiError_("Affiliate username is required.", "VALIDATION_ERROR");
+    const affiliate2 = cleanString_(input.affiliateUsername2, fieldLimit_("Affiliate_Username_2"));
+    if (!affiliate || !affiliate2) throw new ApiError_("Both affiliate usernames are required.", "VALIDATION_ERROR");
     values.Affiliate_Username = affiliate;
+    values.Affiliate_Username_2 = affiliate2;
     values.Notes = structuredNotes_([
       ["Account 1 Email", input.account1Email], ["Account 1 Phone Number", input.account1Phone],
       ["Account 2 Email", input.account2Email], ["Account 2 Phone Number", input.account2Phone]
@@ -1259,7 +1261,7 @@ function filterRequestRows_(rows, input) {
   const brand = cleanString_(input.brand, 50);
   const requestType = cleanString_(input.requestType, 150);
   const search = cleanString_(input.search, 200).toLowerCase();
-  const searchFields = ["Request_ID", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Transaction_ID"];
+  const searchFields = ["Request_ID", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Transaction_ID"];
   return rows.filter(function (row) {
     if (status && row.Status !== status) return false;
     if (brand && row.Brand !== brand) return false;
@@ -1351,11 +1353,11 @@ function projectRequest_(row) {
 }
 
 function projectListRequest_(row) {
-  return selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Transaction_ID", "Status", "Requested_By_Name", "Requested_At", "Taken_By_Name", "Taken_At", "Completed_At", "Unable_Reason", "Last_Updated_At"]);
+  return selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Transaction_ID", "Status", "Requested_By_Name", "Requested_At", "Taken_By_Name", "Taken_At", "Completed_At", "Unable_Reason", "Last_Updated_At"]);
 }
 
 function projectQueueRequest_(row) {
-  return selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Requested_By_Name", "Requested_At", "Status", "Taken_By_ID", "Taken_By_Name", "Taken_At"]);
+  return selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Requested_By_Name", "Requested_At", "Status", "Taken_By_ID", "Taken_By_Name", "Taken_At"]);
 }
 
 function projectBdtQueueRequest_(row) {
