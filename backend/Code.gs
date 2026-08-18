@@ -134,6 +134,7 @@ function handleApi_(e, method) {
       bdtQueue: function () { return success_(bdtQueue_(input)); },
       cspRequests: function () { return success_(cspRequests_(input)); },
       takeRequest: function () { return success_(takeRequest_(input)); },
+      verifyRequest: function () { return success_(verifyRequest_(input)); },
       completeRequest: function () { return success_(completeRequest_(input)); },
       unableRequest: function () { return success_(unableRequest_(input)); },
       cancelRequest: function () { return success_(cancelRequest_(input)); },
@@ -357,12 +358,21 @@ function cspQueue_(input) {
 function bdtQueue_(input) {
   requireRole_(input.token, [ROLES.BDT]);
   const status = cleanString_(input.status || "Active", 30);
-  const cspCaseIds = cspCaseRequestIds_();
+  const history = readRows_(SHEETS.HISTORY), cspCaseIds = cspCaseRequestIds_(history);
   const queue = filterRequestRows_(readRows_(SHEETS.REQUESTS), mergeObjects_(input, { status: "" }))
     .filter(function (row) { return cspCaseIds[cleanString_(row.Request_ID, 100)] === true; })
-    .filter(function (row) { return status === "All" || (status === "Active" ? ACTIVE_REQUEST_STATUSES.indexOf(cleanString_(row.Status, 30)) !== -1 : row.Status === status); })
+    .filter(function (row) {
+      if (status === "All") return true;
+      if (status === "Active") return row.Status === "Pending" || (row.Status === "Processing" && cspProcessingStage_(row, history) === "BDT");
+      if (status === "Processing") return row.Status === "Processing" && cspProcessingStage_(row, history) === "BDT";
+      return row.Status === status;
+    })
     .sort(function (a, b) { return dateMs_(a.Requested_At) - dateMs_(b.Requested_At); })
-    .map(projectBdtQueueRequest_);
+    .map(function (row) {
+      const request = projectBdtQueueRequest_(row);
+      request.Processing_Team = cspProcessingStage_(row, history);
+      return request;
+    });
   return { requests: queue, count: queue.length };
 }
 
@@ -371,14 +381,18 @@ function cspRequests_(input) {
   const history = readRows_(SHEETS.HISTORY);
   const cspCaseIds = cspCaseRequestIds_(history);
   const resolutionRemarks = resolutionRemarksByRequest_(history);
+  const verifications = verificationsByRequest_(history);
   const visibleRows = readRows_(SHEETS.REQUESTS)
     .filter(function (row) { return cspCaseIds[cleanString_(row.Request_ID, 100)] === true; })
-    .filter(function (row) { return session.role !== ROLES.CSP || cleanString_(row.Requested_By_ID, 100) === session.userId; });
+    .filter(function (row) { return session.role !== ROLES.CSP || cleanString_(row.Requested_By_ID, 100) === session.userId || row.Status === "Verified" || (row.Status === "Processing" && cspProcessingStage_(row, history) === "CSP" && cleanString_(row.Taken_By_ID, 100) === session.userId); });
   const requests = filterRequestRows_(visibleRows, mergeObjects_(input, { status: "" }))
     .map(function (row) {
       const request = projectListRequest_(row);
-      request.Processing_Team = "BDT";
+      request.CSP_Case = true;
+      request.Processing_Team = cspProcessingStage_(row, history);
       request.Resolution_Remark = resolutionRemarks[cleanString_(row.Request_ID, 100)] || "";
+      const verification = verifications[cleanString_(row.Request_ID, 100)];
+      if (verification) { request.BDT_Verified_By_Name = verification.name; request.BDT_Verified_At = verification.at; request.Verification_Remark = verification.remark; }
       return request;
     });
   return { requests: requests, count: requests.length };
@@ -626,9 +640,14 @@ function takeRequest_(input) {
   const session = requireSession_(input.token);
   const requestId = requireRequestId_(input.requestId);
   return withRequestLock_(requestId, function (table, request) {
-    requireHandlerRole_(session, request);
-    if (request.Status !== "Pending") {
-      throw new ApiError_("This request is no longer pending.", "REQUEST_CONFLICT", {
+    const cspCase = isCspCaseRequest_(request), oldStatus = cleanString_(request.Status, 30);
+    if (cspCase) {
+      const roles = oldStatus === "Pending" ? [ROLES.BDT] : oldStatus === "Verified" ? [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER] : [];
+      if (roles.indexOf(session.role) === -1) throw new ApiError_("You are not authorized to take this request at its current stage.", "FORBIDDEN");
+    } else if ([ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER].indexOf(session.role) === -1) throw new ApiError_("You are not authorized for this action.", "FORBIDDEN");
+    const takeable = cspCase ? (oldStatus === "Pending" || oldStatus === "Verified") : oldStatus === "Pending";
+    if (!takeable) {
+      throw new ApiError_("This request is no longer available to take.", "REQUEST_CONFLICT", {
         status: request.Status,
         handler: cleanString_(request.Taken_By_Name, 150),
       });
@@ -640,7 +659,21 @@ function takeRequest_(input) {
       Waiting_Seconds: elapsedSeconds_(request.Requested_At, now),
     };
     updateObjectRow_(table, request._row, updates);
-    appendHistory_(requestId, "Taken", "Pending", "Processing", session, "");
+    appendHistory_(requestId, cspCase ? (oldStatus === "Verified" ? "Taken by CSP" : "Taken by BDT") : "Taken", oldStatus, "Processing", session, "");
+    return { request: projectHandledRequest_(mergeObjects_(request, updates)) };
+  });
+}
+
+function verifyRequest_(input) {
+  const session = requireRole_(input.token, [ROLES.BDT]);
+  const requestId = requireRequestId_(input.requestId), remark = cleanString_(input.remark, 1000);
+  return withRequestLock_(requestId, function (table, request) {
+    if (!isCspCaseRequest_(request)) throw new ApiError_("Only CSP-created requests can be verified.", "FORBIDDEN");
+    if (request.Status !== "Processing" || cspProcessingStage_(request) !== "BDT") throw new ApiError_("Only a BDT processing request can be verified.", "REQUEST_CONFLICT", { status: request.Status });
+    if (cleanString_(request.Taken_By_ID, 100) !== session.userId) throw new ApiError_("This request is being handled by another user.", "FORBIDDEN");
+    const now = new Date(), updates = { Status: "Verified", Last_Updated_At: now, Handling_Seconds: elapsedSeconds_(request.Taken_At, now) };
+    updateObjectRow_(table, request._row, updates);
+    appendHistory_(requestId, "Verified by BDT", "Processing", "Verified", session, remark);
     return { request: projectHandledRequest_(mergeObjects_(request, updates)) };
   });
 }
@@ -663,7 +696,12 @@ function unableRequest_(input) {
 
 function finalizeRequest_(requestId, session, newStatus, reason, action, remark) {
   return withRequestLock_(requestId, function (table, request) {
-    const cspCase = requireHandlerRole_(session, request);
+    const cspCase = isCspCaseRequest_(request), stage = cspCase ? cspProcessingStage_(request) : "CSP";
+    if (cspCase) {
+      const roles = newStatus === "Unable" ? [ROLES.BDT] : [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER];
+      const requiredStage = newStatus === "Unable" ? "BDT" : "CSP";
+      if (roles.indexOf(session.role) === -1 || stage !== requiredStage) throw new ApiError_("You are not authorized to update this request at its current stage.", "FORBIDDEN");
+    } else if ([ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER].indexOf(session.role) === -1) throw new ApiError_("You are not authorized for this action.", "FORBIDDEN");
     if (request.Status !== "Processing") throw new ApiError_("Only a processing request can be updated.", "REQUEST_CONFLICT", { status: request.Status });
     if ((cspCase || session.role === ROLES.CSP) && cleanString_(request.Taken_By_ID, 100) !== session.userId) {
       throw new ApiError_("This request is being handled by another user.", "FORBIDDEN");
@@ -677,7 +715,7 @@ function finalizeRequest_(requestId, session, newStatus, reason, action, remark)
     };
     if (newStatus === "Unable") updates.Unable_Reason = reason;
     updateObjectRow_(table, request._row, updates);
-    appendHistory_(requestId, action, "Processing", newStatus, session, cspCase ? resolutionHistoryDetails_(reason, remark) : reason);
+    appendHistory_(requestId, cspCase ? (newStatus === "Unable" ? "Unable by BDT" : "Completed by CSP") : action, "Processing", newStatus, session, cspCase ? resolutionHistoryDetails_(reason, remark) : reason);
     return { request: projectHandledRequest_(mergeObjects_(request, updates)) };
   });
 }
@@ -711,7 +749,11 @@ function requestDetails_(input) {
       return selectFields_(row, ["History_ID", "Request_ID", "Action", "Old_Status", "New_Status", "Performed_By_ID", "Performed_By_Name", "Performed_By_Team", "Details", "Created_At"]);
     });
   const projected = projectHandledRequest_(request);
-  if (projected.Processing_Team === "BDT") projected.Resolution_Remark = resolutionRemarkFromHistory_(history);
+  if (projected.CSP_Case) {
+    projected.Resolution_Remark = resolutionRemarkFromHistory_(history);
+    const verification = verificationsByRequest_(history)[request.Request_ID];
+    if (verification) { projected.BDT_Verified_By_Name = verification.name; projected.BDT_Verified_At = verification.at; projected.Verification_Remark = verification.remark; }
+  }
   if (cleanString_(request[ATTACHMENT_HEADER], 300)) projected.Has_Attachment = true;
   return { request: projected, history: history };
 }
@@ -1302,9 +1344,9 @@ function resolutionHistoryDetails_(reason, remark) {
 
 function resolutionRemarkFromHistory_(history) {
   for (let index = history.length - 1; index >= 0; index -= 1) {
-    const row = history[index], action = cleanString_(row.Action, 100), details = cleanString_(row.Details, 2000);
-    if (action === "Completed") return details;
-    if (action === "Unable") {
+    const row = history[index], status = cleanString_(row.New_Status, 30), details = cleanString_(row.Details, 2000);
+    if (status === "Completed") return details;
+    if (status === "Unable") {
       const marker = "Resolution Remark: ", position = details.indexOf(marker);
       return position === -1 ? "" : details.slice(position + marker.length);
     }
@@ -1315,12 +1357,38 @@ function resolutionRemarkFromHistory_(history) {
 function resolutionRemarksByRequest_(history) {
   const grouped = {};
   (history || readRows_(SHEETS.HISTORY)).forEach(function (row) {
-    const action = cleanString_(row.Action, 100);
-    if (action === "Completed" || action === "Unable") grouped[cleanString_(row.Request_ID, 100)] = row;
+    const status = cleanString_(row.New_Status, 30);
+    if (status === "Completed" || status === "Unable") grouped[cleanString_(row.Request_ID, 100)] = row;
   });
   const remarks = {};
   Object.keys(grouped).forEach(function (requestId) { remarks[requestId] = resolutionRemarkFromHistory_([grouped[requestId]]); });
   return remarks;
+}
+
+function requestHistory_(requestId, history) {
+  return (history || readRows_(SHEETS.HISTORY)).filter(function (row) { return cleanString_(row.Request_ID, 100) === cleanString_(requestId, 100); });
+}
+
+function cspProcessingStage_(request, history) {
+  const status = cleanString_(request.Status, 30);
+  if (status === "Pending" || status === "Unable") return "BDT";
+  if (status === "Verified") return "CSP";
+  const rows = requestHistory_(request.Request_ID, history);
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (cleanString_(row.New_Status, 30) === "Processing") return cleanString_(row.Old_Status, 30) === "Verified" ? "CSP" : "BDT";
+    if (status === "Completed" && cleanString_(row.New_Status, 30) === "Completed") return cleanString_(row.Performed_By_Team, 50).toUpperCase() === "BDT" ? "BDT" : "CSP";
+  }
+  return "BDT";
+}
+
+function verificationsByRequest_(history) {
+  const verifications = {};
+  (history || readRows_(SHEETS.HISTORY)).forEach(function (row) {
+    if (cleanString_(row.New_Status, 30) !== "Verified") return;
+    verifications[cleanString_(row.Request_ID, 100)] = { name: cleanString_(row.Performed_By_Name, 150), at: row.Created_At, remark: cleanString_(row.Details, 1000) };
+  });
+  return verifications;
 }
 
 function isCspCaseRequest_(request) {
@@ -1329,21 +1397,15 @@ function isCspCaseRequest_(request) {
     .some(function (row) { return cleanString_(row.Action, 100) === "CSP Case Created"; });
 }
 
-function requireHandlerRole_(session, request) {
-  const cspCase = isCspCaseRequest_(request);
-  const roles = cspCase ? [ROLES.BDT] : [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER];
-  if (roles.indexOf(session.role) === -1) throw new ApiError_("You are not authorized for this action.", "FORBIDDEN");
-  return cspCase;
-}
-
 function projectHandledRequest_(row) {
   const request = projectRequest_(row);
-  if (isCspCaseRequest_(row)) request.Processing_Team = "BDT";
+  if (isCspCaseRequest_(row)) { request.CSP_Case = true; request.Processing_Team = cspProcessingStage_(row); }
   return request;
 }
 
 function projectBdtRequest_(row) {
   const request = projectRequest_(row);
+  request.CSP_Case = true;
   request.Processing_Team = "BDT";
   return request;
 }
@@ -1353,7 +1415,7 @@ function projectRequest_(row) {
 }
 
 function projectListRequest_(row) {
-  return selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Transaction_ID", "Status", "Requested_By_Name", "Requested_At", "Taken_By_Name", "Taken_At", "Completed_At", "Unable_Reason", "Last_Updated_At"]);
+  return selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Transaction_ID", "Status", "Requested_By_ID", "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Completed_At", "Unable_Reason", "Last_Updated_At"]);
 }
 
 function projectQueueRequest_(row) {

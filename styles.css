@@ -44,3 +44,4 @@ body{background:var(--bg);font-size:14px}.sidebar{width:240px;padding:22px 14px 
 @media(max-width:760px){.attachment-full-backdrop{padding:2vh 2.5vw}.attachment-full-modal{width:95vw;height:92vh;max-height:92vh;padding:10px}.attachment-actions .primary-button{width:100%}}
 .app-footer{padding:0 30px 22px;color:#4f7cff;font-size:11px;font-weight:700;text-align:center}
 @media(max-width:760px){.app-footer{padding:0 14px 18px}}
+.badge.verified{background:#eef0ff;color:#5b55c9}.history-entry.verified .history-icon{border-color:#cbc8f2;background:#f2f1ff}.history-entry.verified .history-icon:after{background:#6861d8}
