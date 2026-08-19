@@ -20,7 +20,7 @@ const SHEETS = {
 
 const HEADERS = {
   Users: ["User_ID", "Name", "Username", "Password_Hash", "Team", "Role", "Status", "Created_At", "Updated_At", "Last_Login"],
-  Requests: ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Status", "Requested_By_ID", "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Completed_By_ID", "Completed_By_Name", "Completed_At", "Unable_Reason", "Cancelled_By_ID", "Cancelled_At", "Waiting_Seconds", "Handling_Seconds", "Total_Seconds", "Last_Updated_At", "Affiliate_Username_2"],
+  Requests: ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Status", "Requested_By_ID", "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Completed_By_ID", "Completed_By_Name", "Completed_At", "Unable_Reason", "Cancelled_By_ID", "Cancelled_At", "Waiting_Seconds", "Handling_Seconds", "Total_Seconds", "Last_Updated_At", "Affiliate_Username_2", "Market", "Account_Type", "Call_Request_Type", "Call_Number_Type"],
   Request_History: ["History_ID", "Request_ID", "Action", "Old_Status", "New_Status", "Performed_By_ID", "Performed_By_Name", "Performed_By_Team", "Details", "Created_At"],
   Request_Types: ["Type_ID", "Request_Type", "Required_Fields", "Optional_Fields", "Active", "Sort_Order"],
   Brands: ["Brand_ID", "Brand_Code", "Brand_Name", "Active", "Sort_Order"],
@@ -44,6 +44,7 @@ const CSP_CASE_TYPES = {
   "High Balance Unlock": true,
   "MAC Signup": true,
   "Affiliate Change Full Name & DOB": true,
+  "Available For Call": true,
 };
 
 const CSP_CREATABLE_CASE_TYPES = {
@@ -51,7 +52,12 @@ const CSP_CREATABLE_CASE_TYPES = {
   "High Balance Unlock": true,
   "MAC Signup": true,
   "Affiliate Change Full Name & DOB": true,
+  "Available For Call": true,
 };
+const MARKETS = { BDT: true, PKR: true, NPR: true, PHP: true };
+const CALL_REQUEST_TYPES = { "Change Email": true, "Add Email": true, "Add Phone Number": true, "Remove Phone Number (2nd,3rd)": true, "Verify Number (2nd,3rd,4th,5th)": true, "Change Linked Player": true };
+const PLAYER_CALL_REQUEST_TYPES = { "Change Email": true, "Add Email": true, "Add Phone Number": true, "Verify Number (2nd,3rd,4th,5th)": true };
+const CALL_NUMBER_TYPES = { Primary: true, "2nd": true, "3rd": true, "4th": true, "5th": true };
 const ATTACHMENT_HEADER = "Attachment_File_ID";
 const ATTACHMENT_FOLDER_PROPERTY = "OPS_REQUEST_ATTACHMENT_FOLDER_ID";
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
@@ -93,7 +99,8 @@ const SAFE_REQUEST_FIELDS = [
   "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name",
   "Taken_At", "Completed_By_ID", "Completed_By_Name", "Completed_At",
   "Unable_Reason", "Cancelled_By_ID", "Cancelled_At", "Waiting_Seconds",
-  "Handling_Seconds", "Total_Seconds", "Last_Updated_At",
+  "Handling_Seconds", "Total_Seconds", "Last_Updated_At", "Market",
+  "Account_Type", "Call_Request_Type", "Call_Number_Type",
 ];
 
 function doGet(e) {
@@ -285,6 +292,7 @@ function createRequest_(input) {
   });
   values.Brand = brand;
   values.Request_Type = requestType;
+  values.Market = session.role === ROLES.BDT ? requireMarket_(session.team) : "BDT";
 
   const required = parseFieldList_(typeRow.Required_Fields);
   const missing = required.filter(function (fieldName) {
@@ -295,7 +303,7 @@ function createRequest_(input) {
 
   const requestsTable = getTable_(SHEETS.REQUESTS);
   if (duplicateCheckEnabled_()) {
-    const similar = findSimilarRequests_(values, requestsTable.rows);
+    const similar = findSimilarRequests_(values, requestsTable.rows.filter(function (row) { return requestMarket_(row) === values.Market; }));
     if (similar.length && input.confirmDuplicate !== true) {
       return { created: false, duplicateWarning: true, similarRequests: similar };
     }
@@ -308,7 +316,7 @@ function createRequest_(input) {
     if (duplicateCheckEnabled_() && input.confirmDuplicate !== true) {
       requestTables_[SHEETS.REQUESTS] = null;
       const table = getTable_(SHEETS.REQUESTS);
-      const concurrentSimilar = findSimilarRequests_(values, table.rows);
+      const concurrentSimilar = findSimilarRequests_(values, table.rows.filter(function (row) { return requestMarket_(row) === values.Market; }));
       if (concurrentSimilar.length) return { created: false, duplicateWarning: true, similarRequests: concurrentSimilar };
     } else requestTables_[SHEETS.REQUESTS] = null;
     const table = getTable_(SHEETS.REQUESTS);
@@ -334,12 +342,10 @@ function myRequests_(input) {
 }
 
 function teamRequests_(input) {
-  requireRole_(input.token, [ROLES.BDT, ROLES.SUPER]);
-  const bdtIds = {};
-  readRows_(SHEETS.USERS).forEach(function (user) {
-    if (cleanString_(user.Team, 50).toUpperCase() === "BDT") bdtIds[cleanString_(user.User_ID, 100)] = true;
-  });
-  const rows = readRows_(SHEETS.REQUESTS).filter(function (row) { return bdtIds[cleanString_(row.Requested_By_ID, 100)] === true; });
+  const session = requireRole_(input.token, [ROLES.BDT, ROLES.SUPER]);
+  const market = session.role === ROLES.BDT ? requireMarket_(session.team) : "";
+  const cspCaseIds = cspCaseRequestIds_();
+  const rows = readRows_(SHEETS.REQUESTS).filter(function (row) { return !cspCaseIds[cleanString_(row.Request_ID, 100)] && (!market || requestMarket_(row) === market); });
   return listResponse_(filterRequests_(rows, input));
 }
 
@@ -356,11 +362,12 @@ function cspQueue_(input) {
 }
 
 function bdtQueue_(input) {
-  requireRole_(input.token, [ROLES.BDT]);
+  const session = requireRole_(input.token, [ROLES.BDT]);
+  const market = requireMarket_(session.team);
   const status = cleanString_(input.status || "Active", 30);
   const history = readRows_(SHEETS.HISTORY), cspCaseIds = cspCaseRequestIds_(history);
   const queue = filterRequestRows_(readRows_(SHEETS.REQUESTS), mergeObjects_(input, { status: "" }))
-    .filter(function (row) { return cspCaseIds[cleanString_(row.Request_ID, 100)] === true; })
+    .filter(function (row) { return cspCaseIds[cleanString_(row.Request_ID, 100)] === true && requestMarket_(row) === market; })
     .filter(function (row) {
       if (status === "All") return true;
       if (status === "Active") return row.Status === "Pending" || (row.Status === "Processing" && cspProcessingStage_(row, history) === "BDT");
@@ -403,9 +410,11 @@ function reports_(input) {
   const from = cleanString_(input.fromDate, 20), to = cleanString_(input.toDate, 20);
   const requestedBy = cleanString_(input.requestedBy, 150).toLowerCase();
   const handledBy = cleanString_(input.handledBy, 150).toLowerCase();
+  const market = cleanString_(input.market, 20).toUpperCase();
+  if (market && !MARKETS[market]) throw new ApiError_("The selected market is invalid.", "INVALID_MARKET");
   const rows = filterRequestRows_(readRows_(SHEETS.REQUESTS), mergeObjects_(input, { limit: MAX_LIMIT })).filter(function (row) {
     const key = dateKey_(row.Requested_At);
-    return (!from || key >= from) && (!to || key <= to) && (!requestedBy || cleanString_(row.Requested_By_Name,150).toLowerCase().indexOf(requestedBy) !== -1) && (!handledBy || cleanString_(row.Taken_By_Name,150).toLowerCase().indexOf(handledBy) !== -1);
+    return (!market || requestMarket_(row) === market) && (!from || key >= from) && (!to || key <= to) && (!requestedBy || cleanString_(row.Requested_By_Name,150).toLowerCase().indexOf(requestedBy) !== -1) && (!handledBy || cleanString_(row.Taken_By_Name,150).toLowerCase().indexOf(handledBy) !== -1);
   });
   const completed = rows.filter(function(r){return r.Status === "Completed";}).length;
   const unable = rows.filter(function(r){return r.Status === "Unable";}).length;
@@ -429,6 +438,7 @@ function createCspCase_(input) {
   const session = requireRole_(input.token, [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER]);
   const requestType = cleanString_(input.requestType, 150);
   const brand = cleanString_(input.brand, 50);
+  const market = requireMarket_(input.market);
   if (!CSP_CREATABLE_CASE_TYPES[requestType]) throw new ApiError_("The selected CSP case type is not available.", "INVALID_REQUEST_TYPE");
   const brandRow = readRows_(SHEETS.BRANDS).find(function (row) { return isTrue_(row.Active) && cleanString_(row.Brand_Code, 50) === brand; });
   if (!brandRow) throw new ApiError_("The selected brand is not available.", "INVALID_BRAND");
@@ -436,6 +446,7 @@ function createCspCase_(input) {
   const values = emptyRequest_();
   values.Brand = brand;
   values.Request_Type = requestType;
+  values.Market = market;
   const player = cleanString_(input.playerUsername, fieldLimit_("Player_Username"));
   const affiliate = cleanString_(input.affiliateUsername, fieldLimit_("Affiliate_Username"));
   const notes = cleanString_(input.notes, fieldLimit_("Notes"));
@@ -459,7 +470,7 @@ function createCspCase_(input) {
       ["Account 1 Email", input.account1Email], ["Account 1 Phone Number", input.account1Phone],
       ["Account 2 Email", input.account2Email], ["Account 2 Phone Number", input.account2Phone]
     ], notes);
-  } else {
+  } else if (requestType === "Affiliate Change Full Name & DOB") {
     const currentName = cleanString_(input.currentFullName, fieldLimit_("Current_Name"));
     const newName = cleanString_(input.newFullName, fieldLimit_("New_Full_Name"));
     const currentDob = validDateInput_(input.currentDob), newDob = validDateInput_(input.newDob);
@@ -468,6 +479,17 @@ function createCspCase_(input) {
     values.Current_Name = currentName;
     values.New_Full_Name = newName;
     values.Notes = structuredNotes_([["Current DOB", currentDob], ["New DOB", newDob]], notes);
+  } else {
+    const accountType = cleanString_(input.accountType, 20);
+    const callRequestType = cleanString_(input.callRequestType, 80);
+    const callNumberType = cleanString_(input.callNumberType, 20);
+    if (["Affiliate", "Player"].indexOf(accountType) === -1) throw new ApiError_("A valid account type is required.", "VALIDATION_ERROR");
+    if (!CALL_REQUEST_TYPES[callRequestType] || (accountType === "Player" && !PLAYER_CALL_REQUEST_TYPES[callRequestType])) throw new ApiError_("The selected request is not valid for this account type.", "VALIDATION_ERROR");
+    if (!CALL_NUMBER_TYPES[callNumberType]) throw new ApiError_("A valid call number is required.", "VALIDATION_ERROR");
+    values.Account_Type = accountType;
+    values.Call_Request_Type = callRequestType;
+    values.Call_Number_Type = callNumberType;
+    values.Notes = notes;
   }
 
   const lock = LockService.getScriptLock();
@@ -642,6 +664,7 @@ function takeRequest_(input) {
   return withRequestLock_(requestId, function (table, request) {
     const cspCase = isCspCaseRequest_(request), oldStatus = cleanString_(request.Status, 30);
     if (cspCase) {
+      if (oldStatus === "Pending" && session.role === ROLES.BDT) assertRequestMarket_(session, request);
       const roles = oldStatus === "Pending" ? [ROLES.BDT] : oldStatus === "Verified" ? [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER] : [];
       if (roles.indexOf(session.role) === -1) throw new ApiError_("You are not authorized to take this request at its current stage.", "FORBIDDEN");
     } else if ([ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER].indexOf(session.role) === -1) throw new ApiError_("You are not authorized for this action.", "FORBIDDEN");
@@ -669,6 +692,7 @@ function verifyRequest_(input) {
   const requestId = requireRequestId_(input.requestId), remark = cleanString_(input.remark, 1000);
   return withRequestLock_(requestId, function (table, request) {
     if (!isCspCaseRequest_(request)) throw new ApiError_("Only CSP-created requests can be verified.", "FORBIDDEN");
+    assertRequestMarket_(session, request);
     if (request.Status !== "Processing" || cspProcessingStage_(request) !== "BDT") throw new ApiError_("Only a BDT processing request can be verified.", "REQUEST_CONFLICT", { status: request.Status });
     if (cleanString_(request.Taken_By_ID, 100) !== session.userId) throw new ApiError_("This request is being handled by another user.", "FORBIDDEN");
     const now = new Date(), updates = { Status: "Verified", Last_Updated_At: now, Handling_Seconds: elapsedSeconds_(request.Taken_At, now) };
@@ -701,6 +725,7 @@ function finalizeRequest_(requestId, session, newStatus, reason, action, remark)
       const roles = newStatus === "Unable" ? [ROLES.BDT] : [ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER];
       const requiredStage = newStatus === "Unable" ? "BDT" : "CSP";
       if (roles.indexOf(session.role) === -1 || stage !== requiredStage) throw new ApiError_("You are not authorized to update this request at its current stage.", "FORBIDDEN");
+      if (newStatus === "Unable") assertRequestMarket_(session, request);
     } else if ([ROLES.CSP, ROLES.CSP_ADMIN, ROLES.SUPER].indexOf(session.role) === -1) throw new ApiError_("You are not authorized for this action.", "FORBIDDEN");
     if (request.Status !== "Processing") throw new ApiError_("Only a processing request can be updated.", "REQUEST_CONFLICT", { status: request.Status });
     if ((cspCase || session.role === ROLES.CSP) && cleanString_(request.Taken_By_ID, 100) !== session.userId) {
@@ -960,7 +985,7 @@ function validateApiPassword_(password) {
 
 function validateTeamRole_(team, role) {
   const expectedTeams = {};
-  expectedTeams[ROLES.BDT] = "BDT";
+  if (role === ROLES.BDT && MARKETS[team]) return;
   expectedTeams[ROLES.CSP] = "CSP";
   expectedTeams[ROLES.CSP_ADMIN] = "CSP";
   expectedTeams[ROLES.SUPER] = "ADMIN";
@@ -1320,12 +1345,28 @@ function listResponse_(requests) {
 function authorizeRequestView_(session, request) {
   if (session.role === ROLES.SUPER || session.role === ROLES.CSP || session.role === ROLES.CSP_ADMIN) return;
   if (session.role === ROLES.BDT) {
+    const market = requireMarket_(session.team);
+    if (requestMarket_(request) !== market) throw new ApiError_("You are not authorized to view this request.", "FORBIDDEN");
     if (isCspCaseRequest_(request)) return;
     if (request.Requested_By_ID === session.userId) return;
-    const requester = readRows_(SHEETS.USERS).find(function (user) { return cleanString_(user.User_ID, 100) === cleanString_(request.Requested_By_ID, 100); });
-    if (requester && cleanString_(requester.Team, 50).toUpperCase() === "BDT") return;
+    return;
   }
   throw new ApiError_("You are not authorized to view this request.", "FORBIDDEN");
+}
+
+function requireMarket_(value) {
+  const market = cleanString_(value, 20).toUpperCase();
+  if (!MARKETS[market]) throw new ApiError_("A valid market is required.", "INVALID_MARKET");
+  return market;
+}
+
+function requestMarket_(request) {
+  const market = cleanString_(request && request.Market, 20).toUpperCase();
+  return MARKETS[market] ? market : "BDT";
+}
+
+function assertRequestMarket_(session, request) {
+  if (requestMarket_(request) !== requireMarket_(session.team)) throw new ApiError_("You are not authorized for this request market.", "FORBIDDEN");
 }
 
 function cspCaseRequestIds_(history) {
@@ -1411,15 +1452,21 @@ function projectBdtRequest_(row) {
 }
 
 function projectRequest_(row) {
-  return selectFields_(row, SAFE_REQUEST_FIELDS);
+  const request = selectFields_(row, SAFE_REQUEST_FIELDS);
+  request.Market = requestMarket_(row);
+  return request;
 }
 
 function projectListRequest_(row) {
-  return selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Transaction_ID", "Status", "Requested_By_ID", "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Completed_At", "Unable_Reason", "Last_Updated_At"]);
+  const request = selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Transaction_ID", "Status", "Requested_By_ID", "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Completed_At", "Unable_Reason", "Last_Updated_At", "Account_Type", "Call_Request_Type", "Call_Number_Type"]);
+  request.Market = requestMarket_(row);
+  return request;
 }
 
 function projectQueueRequest_(row) {
-  return selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Requested_By_Name", "Requested_At", "Status", "Taken_By_ID", "Taken_By_Name", "Taken_At"]);
+  const request = selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Requested_By_Name", "Requested_At", "Status", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Account_Type", "Call_Request_Type", "Call_Number_Type"]);
+  request.Market = requestMarket_(row);
+  return request;
 }
 
 function projectBdtQueueRequest_(row) {
