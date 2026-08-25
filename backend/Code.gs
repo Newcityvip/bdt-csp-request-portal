@@ -490,6 +490,13 @@ function createCspCase_(input) {
     if (["Affiliate", "Player"].indexOf(accountType) === -1) throw new ApiError_("A valid account type is required.", "VALIDATION_ERROR");
     if (!CALL_REQUEST_TYPES[callRequestType] || (accountType === "Player" && !PLAYER_CALL_REQUEST_TYPES[callRequestType])) throw new ApiError_("The selected request is not valid for this account type.", "VALIDATION_ERROR");
     if (!CALL_NUMBER_TYPES[callNumberType]) throw new ApiError_("A valid call number is required.", "VALIDATION_ERROR");
+    if (accountType === "Affiliate") {
+      if (!affiliate) throw new ApiError_("Affiliate Username is required.", "VALIDATION_ERROR");
+      values.Affiliate_Username = affiliate;
+    } else {
+      if (!player) throw new ApiError_("Player Username is required.", "VALIDATION_ERROR");
+      values.Player_Username = player;
+    }
     values.Account_Type = accountType;
     values.Call_Request_Type = callRequestType;
     values.Call_Number_Type = callNumberType;
