@@ -20,7 +20,7 @@ const SHEETS = {
 
 const HEADERS = {
   Users: ["User_ID", "Name", "Username", "Password_Hash", "Team", "Role", "Status", "Created_At", "Updated_At", "Last_Login"],
-  Requests: ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Status", "Requested_By_ID", "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Completed_By_ID", "Completed_By_Name", "Completed_At", "Unable_Reason", "Cancelled_By_ID", "Cancelled_At", "Waiting_Seconds", "Handling_Seconds", "Total_Seconds", "Last_Updated_At", "Affiliate_Username_2", "Market", "Account_Type", "Call_Request_Type", "Call_Number_Type"],
+  Requests: ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Status", "Requested_By_ID", "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Completed_By_ID", "Completed_By_Name", "Completed_At", "Unable_Reason", "Cancelled_By_ID", "Cancelled_At", "Waiting_Seconds", "Handling_Seconds", "Total_Seconds", "Last_Updated_At", "Affiliate_Username_2", "Market", "Account_Type", "Call_Request_Type", "Call_Number_Type", "Lookup_Player_Username", "Lookup_Last_Deposit", "Lookup_Last_Bet", "Lookup_Channel_Type", "Lookup_Channel_Name"],
   Request_History: ["History_ID", "Request_ID", "Action", "Old_Status", "New_Status", "Performed_By_ID", "Performed_By_Name", "Performed_By_Team", "Details", "Created_At"],
   Request_Types: ["Type_ID", "Request_Type", "Required_Fields", "Optional_Fields", "Active", "Sort_Order"],
   Brands: ["Brand_ID", "Brand_Code", "Brand_Name", "Active", "Sort_Order"],
@@ -101,7 +101,11 @@ const SAFE_REQUEST_FIELDS = [
   "Unable_Reason", "Cancelled_By_ID", "Cancelled_At", "Waiting_Seconds",
   "Handling_Seconds", "Total_Seconds", "Last_Updated_At", "Market",
   "Account_Type", "Call_Request_Type", "Call_Number_Type",
+  "Lookup_Player_Username", "Lookup_Last_Deposit", "Lookup_Last_Bet",
+  "Lookup_Channel_Type", "Lookup_Channel_Name",
 ];
+
+const PHONE_LOOKUP_REQUEST_TYPE = "User Details by Phone Number";
 
 function doGet(e) {
   return handleApi_(e, "GET");
@@ -706,7 +710,14 @@ function completeRequest_(input) {
   const session = requireSession_(input.token);
   const requestId = requireRequestId_(input.requestId);
   const remark = cleanString_(input.remark, 1000);
-  return finalizeRequest_(requestId, session, "Completed", "", "Completed", remark);
+  const lookupResponse = {
+    Lookup_Player_Username: cleanString_(input.lookupPlayerUsername, fieldLimit_("Lookup_Player_Username")),
+    Lookup_Last_Deposit: cleanString_(input.lookupLastDeposit, fieldLimit_("Lookup_Last_Deposit")),
+    Lookup_Last_Bet: cleanString_(input.lookupLastBet, fieldLimit_("Lookup_Last_Bet")),
+    Lookup_Channel_Type: cleanString_(input.lookupChannelType, fieldLimit_("Lookup_Channel_Type")),
+    Lookup_Channel_Name: cleanString_(input.lookupChannelName, fieldLimit_("Lookup_Channel_Name")),
+  };
+  return finalizeRequest_(requestId, session, "Completed", "", "Completed", remark, lookupResponse);
 }
 
 function unableRequest_(input) {
@@ -718,7 +729,7 @@ function unableRequest_(input) {
   return finalizeRequest_(requestId, session, "Unable", reason, "Unable", remark);
 }
 
-function finalizeRequest_(requestId, session, newStatus, reason, action, remark) {
+function finalizeRequest_(requestId, session, newStatus, reason, action, remark, lookupResponse) {
   return withRequestLock_(requestId, function (table, request) {
     const cspCase = isCspCaseRequest_(request), stage = cspCase ? cspProcessingStage_(request) : "CSP";
     if (cspCase) {
@@ -731,6 +742,12 @@ function finalizeRequest_(requestId, session, newStatus, reason, action, remark)
     if ((cspCase || session.role === ROLES.CSP) && cleanString_(request.Taken_By_ID, 100) !== session.userId) {
       throw new ApiError_("This request is being handled by another user.", "FORBIDDEN");
     }
+    if (!cspCase && newStatus === "Completed" && cleanString_(request.Request_Type, 150) === PHONE_LOOKUP_REQUEST_TYPE) {
+      if (session.role !== ROLES.SUPER && cleanString_(request.Taken_By_ID, 100) !== session.userId) throw new ApiError_("This request is being handled by another user.", "FORBIDDEN");
+      const requiredLookupFields = ["Lookup_Player_Username", "Lookup_Last_Deposit", "Lookup_Last_Bet", "Lookup_Channel_Type", "Lookup_Channel_Name"];
+      const missingLookupFields = requiredLookupFields.filter(function (field) { return !cleanString_(lookupResponse && lookupResponse[field], fieldLimit_(field)); });
+      if (missingLookupFields.length) throw new ApiError_("All user detail response fields are required before completion.", "VALIDATION_ERROR");
+    }
     const now = new Date();
     const updates = {
       Status: newStatus, Completed_By_ID: session.userId, Completed_By_Name: session.name,
@@ -739,6 +756,9 @@ function finalizeRequest_(requestId, session, newStatus, reason, action, remark)
       Total_Seconds: elapsedSeconds_(request.Requested_At, now),
     };
     if (newStatus === "Unable") updates.Unable_Reason = reason;
+    if (!cspCase && newStatus === "Completed" && cleanString_(request.Request_Type, 150) === PHONE_LOOKUP_REQUEST_TYPE) {
+      Object.keys(lookupResponse).forEach(function (field) { updates[field] = lookupResponse[field]; });
+    }
     updateObjectRow_(table, request._row, updates);
     appendHistory_(requestId, cspCase ? (newStatus === "Unable" ? "Unable by BDT" : "Completed by CSP") : action, "Processing", newStatus, session, cspCase ? resolutionHistoryDetails_(reason, remark) : reason);
     return { request: projectHandledRequest_(mergeObjects_(request, updates)) };
@@ -1458,13 +1478,13 @@ function projectRequest_(row) {
 }
 
 function projectListRequest_(row) {
-  const request = selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Transaction_ID", "Status", "Requested_By_ID", "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Completed_At", "Unable_Reason", "Last_Updated_At", "Account_Type", "Call_Request_Type", "Call_Number_Type"]);
+  const request = selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Transaction_ID", "Status", "Requested_By_ID", "Requested_By_Name", "Requested_At", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Completed_At", "Unable_Reason", "Last_Updated_At", "Account_Type", "Call_Request_Type", "Call_Number_Type", "Lookup_Player_Username", "Lookup_Last_Deposit", "Lookup_Last_Bet", "Lookup_Channel_Type", "Lookup_Channel_Name"]);
   request.Market = requestMarket_(row);
   return request;
 }
 
 function projectQueueRequest_(row) {
-  const request = selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Requested_By_Name", "Requested_At", "Status", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Account_Type", "Call_Request_Type", "Call_Number_Type"]);
+  const request = selectFields_(row, ["Request_ID", "Brand", "Request_Type", "Player_Username", "Affiliate_Username", "Affiliate_Username_2", "Phone_Number", "Email", "Current_Email", "New_Email", "Current_Name", "New_Full_Name", "Current_Player_Username", "New_Player_Username", "Transaction_ID", "Amount", "Notes", "Requested_By_Name", "Requested_At", "Status", "Taken_By_ID", "Taken_By_Name", "Taken_At", "Account_Type", "Call_Request_Type", "Call_Number_Type", "Lookup_Player_Username", "Lookup_Last_Deposit", "Lookup_Last_Bet", "Lookup_Channel_Type", "Lookup_Channel_Name"]);
   request.Market = requestMarket_(row);
   return request;
 }
