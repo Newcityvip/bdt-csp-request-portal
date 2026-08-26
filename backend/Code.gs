@@ -369,19 +369,19 @@ function bdtQueue_(input) {
   const session = requireRole_(input.token, [ROLES.BDT]);
   const market = requireMarket_(session.team);
   const status = cleanString_(input.status || "Active", 30);
-  const history = readRows_(SHEETS.HISTORY), cspCaseIds = cspCaseRequestIds_(history);
+  const history = readRows_(SHEETS.HISTORY), cspCaseIds = cspCaseRequestIds_(history), processingStages = cspProcessingStages_(history);
   const queue = filterRequestRows_(readRows_(SHEETS.REQUESTS), mergeObjects_(input, { status: "" }))
     .filter(function (row) { return cspCaseIds[cleanString_(row.Request_ID, 100)] === true && requestMarket_(row) === market; })
     .filter(function (row) {
       if (status === "All") return true;
-      if (status === "Active") return row.Status === "Pending" || (row.Status === "Processing" && cspProcessingStage_(row, history) === "BDT");
-      if (status === "Processing") return row.Status === "Processing" && cspProcessingStage_(row, history) === "BDT";
+      if (status === "Active") return row.Status === "Pending" || (row.Status === "Processing" && cspProcessingStage_(row, history, processingStages) === "BDT");
+      if (status === "Processing") return row.Status === "Processing" && cspProcessingStage_(row, history, processingStages) === "BDT";
       return row.Status === status;
     })
     .sort(function (a, b) { return dateMs_(a.Requested_At) - dateMs_(b.Requested_At); })
     .map(function (row) {
       const request = projectBdtQueueRequest_(row);
-      request.Processing_Team = cspProcessingStage_(row, history);
+      request.Processing_Team = cspProcessingStage_(row, history, processingStages);
       return request;
     });
   return { requests: queue, count: queue.length };
@@ -393,14 +393,15 @@ function cspRequests_(input) {
   const cspCaseIds = cspCaseRequestIds_(history);
   const resolutionRemarks = resolutionRemarksByRequest_(history);
   const verifications = verificationsByRequest_(history);
+  const processingStages = cspProcessingStages_(history);
   const visibleRows = readRows_(SHEETS.REQUESTS)
     .filter(function (row) { return cspCaseIds[cleanString_(row.Request_ID, 100)] === true; })
-    .filter(function (row) { return session.role !== ROLES.CSP || cleanString_(row.Requested_By_ID, 100) === session.userId || row.Status === "Verified" || (row.Status === "Processing" && cspProcessingStage_(row, history) === "CSP" && cleanString_(row.Taken_By_ID, 100) === session.userId); });
+    .filter(function (row) { return session.role !== ROLES.CSP || cleanString_(row.Requested_By_ID, 100) === session.userId || row.Status === "Verified" || (row.Status === "Processing" && cspProcessingStage_(row, history, processingStages) === "CSP" && cleanString_(row.Taken_By_ID, 100) === session.userId); });
   const requests = filterRequestRows_(visibleRows, mergeObjects_(input, { status: "" }))
     .map(function (row) {
       const request = projectListRequest_(row);
       request.CSP_Case = true;
-      request.Processing_Team = cspProcessingStage_(row, history);
+      request.Processing_Team = cspProcessingStage_(row, history, processingStages);
       request.Resolution_Remark = resolutionRemarks[cleanString_(row.Request_ID, 100)] || "";
       const verification = verifications[cleanString_(row.Request_ID, 100)];
       if (verification) { request.BDT_Verified_By_Name = verification.name; request.BDT_Verified_At = verification.at; request.Verification_Remark = verification.remark; }
@@ -1437,10 +1438,23 @@ function requestHistory_(requestId, history) {
   return (history || readRows_(SHEETS.HISTORY)).filter(function (row) { return cleanString_(row.Request_ID, 100) === cleanString_(requestId, 100); });
 }
 
-function cspProcessingStage_(request, history) {
+function cspProcessingStages_(history) {
+  const stages = { processing: {}, completed: {} };
+  (history || readRows_(SHEETS.HISTORY)).forEach(function (row) {
+    const requestId = cleanString_(row.Request_ID, 100), status = cleanString_(row.New_Status, 30);
+    if (status === "Processing") stages.processing[requestId] = cleanString_(row.Old_Status, 30) === "Verified" ? "CSP" : "BDT";
+    if (status === "Completed") stages.completed[requestId] = cleanString_(row.Performed_By_Team, 50).toUpperCase() === "BDT" ? "BDT" : "CSP";
+  });
+  return stages;
+}
+
+function cspProcessingStage_(request, history, stages) {
   const status = cleanString_(request.Status, 30);
   if (status === "Pending" || status === "Unable") return "BDT";
   if (status === "Verified") return "CSP";
+  const requestId = cleanString_(request.Request_ID, 100), indexed = stages || null;
+  if (status === "Processing" && indexed && indexed.processing[requestId]) return indexed.processing[requestId];
+  if (status === "Completed" && indexed && indexed.completed[requestId]) return indexed.completed[requestId];
   const rows = requestHistory_(request.Request_ID, history);
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     const row = rows[index];
