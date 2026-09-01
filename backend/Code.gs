@@ -507,6 +507,7 @@ function createCspCase_(input) {
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   let uploadedFile = null, requestCreated = false;
+  let result;
   try {
     const table = getTable_(SHEETS.REQUESTS), now = new Date();
     if (attachment) {
@@ -524,11 +525,26 @@ function createCspCase_(input) {
     appendHistory_(values.Request_ID, "CSP Case Created", "", "Pending", session, requestType);
     const projected = projectBdtRequest_(values);
     if (uploadedFile) projected.Has_Attachment = true;
-    return { created: true, ticket: values.Request_ID, request: projected };
+    result = { created: true, ticket: values.Request_ID, request: projected };
   } catch (error) {
     if (uploadedFile && !requestCreated) { try { uploadedFile.setTrashed(true); } catch (cleanupError) {} }
     throw error;
   } finally { lock.releaseLock(); }
+  notifyNewCspCaseTelegram_(values, session);
+  return result;
+}
+
+function notifyNewCspCaseTelegram_(request, session) {
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    const token = cleanString_(properties.getProperty("CSP_REQUEST_TG_BOT_TOKEN"), 300);
+    const chatId = cleanString_(properties.getProperty("CSP_REQUEST_TG_CHAT_ID"), 100);
+    if (!/^\d+:[A-Za-z0-9_-]+$/.test(token) || !/^-?\d+$/.test(chatId)) return;
+    const safe = function (value) { return cleanString_(value, 500).replace(/[\r\n]+/g, " "); };
+    const account = request.Player_Username || request.Affiliate_Username || request.Account_Type || "—";
+    const message = ["🔔 New CSP Request", "", "Ticket: " + safe(request.Request_ID), "Market: " + safe(request.Market), "Brand: " + safe(request.Brand), "Request: " + safe(request.Request_Type), "Player/Affiliate: " + safe(account), "Requested By: " + safe(session.name), "", "Please check CSP Requests."].join("\n");
+    UrlFetchApp.fetch("https://api.telegram.org/bot" + token + "/sendMessage", { method: "post", payload: { chat_id: chatId, text: message }, muteHttpExceptions: true });
+  } catch (error) { /* Telegram must never affect CSP Case creation. */ }
 }
 
 function structuredNotes_(fields, notes) {
