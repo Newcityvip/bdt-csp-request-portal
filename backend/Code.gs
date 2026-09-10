@@ -395,8 +395,7 @@ function cspRequests_(input) {
   const verifications = verificationsByRequest_(history);
   const processingStages = cspProcessingStages_(history);
   const visibleRows = readRows_(SHEETS.REQUESTS)
-    .filter(function (row) { return cspCaseIds[cleanString_(row.Request_ID, 100)] === true; })
-    .filter(function (row) { return session.role !== ROLES.CSP || cleanString_(row.Requested_By_ID, 100) === session.userId || row.Status === "Verified" || (row.Status === "Processing" && cspProcessingStage_(row, history, processingStages) === "CSP" && cleanString_(row.Taken_By_ID, 100) === session.userId); });
+    .filter(function (row) { return cspCaseIds[cleanString_(row.Request_ID, 100)] === true; });
   const requests = filterRequestRows_(visibleRows, mergeObjects_(input, { status: "" }))
     .map(function (row) {
       const request = projectListRequest_(row);
